@@ -1,6 +1,6 @@
 //  "EV3ArduinoExtensions"
 
-#define VERSION "1.5"
+#define VERSION "1.6"
 
 // Set one of the following to '1' to select which configuration to build for. These each
 // represent one of the configurations that we are currently using. More can certainly be added
@@ -8,11 +8,11 @@
 // Any can have either servos or NeoPixels attached as pins allow. Note that you must also select
 // the appropriate Arduino flavor under Tools/Board.
 //
-// Arduino Uno with the AdaFruit Music Maker Shield
+// Arduino Uno with the AdaFruit Music Maker Shield. Still useful for development.
 #define UnoWithAdafruitMms 0
-// Pro Micro with the AdaFruit Music Maker Breakout board
+// EV3 Extensions Board version 1 (Pro Micro with AdaFruit Music Maker Breakout board)
 #define Ev3ExtensionsV1 0
-// Pro Micro alone
+// EV3 Extensions Board version 2 (Pro Micro with AdaFruit Music Maker Breakout board)
 #define Ev3ExtensionsV2 1
 
 #if UnoWithAdafruitMms
@@ -79,8 +79,8 @@
 #define featureSynth 1
 #define allMidiHave2Bytes 1
 #define featureServos 1
-#define servo0Pin 10
-#define servo1Pin 9
+#define servo0Pin 9
+#define servo1Pin 10
 #define featureNeoPix 1
 #define neoPix0Pin 5
 #define neoPix1Pin 6
@@ -106,10 +106,14 @@
 #endif
 #if VERBOSITY >= 2
 #define _print2(x) Serial.print(x)
+#define _printp2(x,p) Serial.print(x,p)
 #define _println2(x) Serial.println(x)
+#define _printpln2(x,p) Serial.println(x,p)
 #else
 #define _print2(x)
+#define _printp2(x,p)
 #define _println2(x)
+#define _printpln2(x,p)
 #endif
 #if VERBOSITY >= 3
 #define _print3(x) Serial.print(x)
@@ -665,6 +669,19 @@ void processNeoPixShow( byte cmd, const byte* data )
   byte strip = (data[0] & 0x1);
   uint16_t frame = (data[0] >> 1);
   neoPixelData& npdata( neoPixels[strip] );
+#if 0
+  Serial.println( F("show") );
+  uint8_t* pixels = npdata.strip.getPixels();
+  uint16_t length = npdata.strip.numPixels();
+  for( int i = 0; i < length; i += 8 ) {
+    for( int j = 0; j < 8; ++j ) {
+      Serial.print( pixels[(i+j)*3+0], HEX ); Serial.print(F(","));
+      Serial.print( pixels[(i+j)*3+1], HEX ); Serial.print(F(","));
+      Serial.print( pixels[(i+j)*3+2], HEX ); Serial.print(F(" "));
+    }
+    Serial.println( F("") );
+  }
+#endif
   npdata.strip.setFrame( frame );
   npdata.strip.show();
 }
@@ -1002,7 +1019,7 @@ int readRequests = 0;
 
 void processCmdQueueCheck()
 {
-  _print2( F("CmdQueue bytes ") ); _print2( cmdQueue.bytes() ); _print2( F(" available ") ); _print2( Wire.available() ); _print2( F(" reads " ) ); _print2( readRequests ); _print2( F(" status ") ); _println2( genStatusByte() );
+  _print2( F("CmdQueue bytes ") ); _print2( cmdQueue.bytes() ); _print2( F(" available ") ); _print2( Wire.available() ); _print2( F(" reads " ) ); _print2( readRequests ); _print2( F(" status ") ); _printpln2( genStatusByte(), HEX );
   readRequests = 0;
 }
 #endif // DIAG_QUEUE
