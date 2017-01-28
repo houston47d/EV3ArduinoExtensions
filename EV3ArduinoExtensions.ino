@@ -1,6 +1,6 @@
 //  "EV3ArduinoExtensions"
 
-#define VERSION "1.6"
+#define VERSION "1.7"
 
 // Set one of the following to '1' to select which configuration to build for. These each
 // represent one of the configurations that we are currently using. More can certainly be added
@@ -702,11 +702,11 @@ void processNeoPixSetEnd( byte cmd, const byte* data )
     npdata.strip.setFrame( frame );
     uint16_t endPosition = data[1];
     uint32_t endColor = Adafruit_NeoPixel::Color( data[2], data[3], data[4] );
-    if( npdata.startPosition != -1 )
+    if( npdata.startPosition != (uint16_t)-1 )
       npdata.strip.setPixelRange( npdata.startPosition, npdata.startColor, endPosition, endColor );
     else
       npdata.strip.setPixelColor( endPosition, endColor );
-    npdata.startPosition = -1;
+    npdata.startPosition = (uint16_t)-1;
   }
 }
 void processNeoPixSetAll( byte cmd, const byte* data )
@@ -736,7 +736,7 @@ void processNeoPixRotate( byte cmd, const byte* data )
 void processNeoPixWalkPixels( byte cmd, const byte* data )
 {
   byte strip = (data[0] & 0x1);
-  uint16_t frame = (data[0] >> 1);
+  // uint16_t frame = (data[0] >> 1);
   neoPixelData& npdata( neoPixels[strip] );
   if( npdata.strip.numPixels() ) {
     if( npdata.timerId >= 0 ) {
@@ -849,6 +849,8 @@ void processMusicMode( byte cmd, const byte* data )
 #if featureCodec
   if( data[0] != 2 && mp3CodecMode ) {
     _println2( F("Turning off CODEC mode") );
+    SD.end();
+    sdCardPresent = false;
     VS1053_CODEC.exit();
     mp3CodecMode = false;
   }
@@ -877,6 +879,9 @@ void processMusicMode( byte cmd, const byte* data )
   if( data[0] == 2 ) {
 #if featureCodec
     if ( !mp3CodecMode ) {
+      // Initialize the SD card. If it is not present, it can take over 2 seconds for thsi to complete,
+      // so we don't want to do it if the application doesn't call for it.
+      sdCardPresent = SD.begin( codecCardCs );
       if ( usingAdaFruitMMS && sdCardPresent ) {
         _println2( F("Turning on CODEC mode") );
         mp3CodecMode = VS1053_CODEC.enter();
@@ -923,20 +928,8 @@ void processReset( byte cmd, const byte* data )
 #if featureServos
   processServoReset();
 #endif // featureServos
-#if featureSynth
-  if ( midiSynthMode )
-  {
-    // Nothing to do...
-    midiSynthMode = false;
-  }
-#endif // featureSynth
-#if featureCodec
-  if ( mp3CodecMode )
-  {
-    VS1053_CODEC.exit();
-    mp3CodecMode = false;
-  }
-#endif
+  byte commandData[] = { 0 };
+  processMusicMode( 1, commandData );
 
   // Originally did this only during setup, but the Pro Micro boards don't talk over serial
   // while running setup, so you never see it. Now I dump it out on each reset default state.
@@ -1083,8 +1076,10 @@ void setup()
   // This preceedes the VS1053 initialization (which can take a half second) just so that the
   // lights are turned off as soon as possible if present.
   neoPixels[0].strip.setPin( neoPix0Pin );
-  neoPixels[0].strip.clearStrip();
+  neoPixels[0].strip.begin();
   neoPixels[1].strip.setPin( neoPix1Pin );
+  neoPixels[1].strip.begin();
+  neoPixels[0].strip.clearStrip();
   neoPixels[1].strip.clearStrip();
   processNeoPixReset();
 #endif // featureNeoPix
@@ -1108,11 +1103,6 @@ void setup()
   // the AdaFruit Music Maker Shield.
   usingAdaFruitMMS = VS1053_CODEC.enter();
   // VS1053_CODEC.exit(); not necessary since we know we haven't played anything.
-  if( usingAdaFruitMMS ) {
-    // It is possible that a different shield is present that supports the SD card, but for
-    // now we only look if the AdaFruit shield is present.
-    sdCardPresent = SD.begin( codecCardCs );
-  }
 #endif // featureCodec
 
 #if featureSynth
@@ -1264,7 +1254,7 @@ void processCmdQueue()
     }
     else {
 #endif // featureSynth
-      for ( int i = 0; i < sizeof(commandToFuncMap) / sizeof(commandToFuncMap[0]); ++i )
+      for ( uint8_t i = 0; i < sizeof(commandToFuncMap) / sizeof(commandToFuncMap[0]); ++i )
       {
         byte mapCmd = pgm_read_byte_near( &commandToFuncMap[i].cmd );
         // _print( "i " ); _print( i ); _print( " cmd "); _println( mapCmd );
