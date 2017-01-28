@@ -1,6 +1,6 @@
 //  "EV3ArduinoExtensions"
 
-#define VERSION "1.3"
+#define VERSION "1.4"
 
 // Set one of the following to '1' to select which configuration to build for. These each
 // represent one of the configurations that we are currently using. More can certainly be added
@@ -67,7 +67,7 @@
 #define featureSynth 1
 #define synthPin 5
 #define allMidiHave2Bytes 1
-#define featureServos 0 // was 1
+#define featureServos 1
 #define servo0Pin 8
 #define servo1Pin 9
 #define featureNeoPix 1
@@ -100,7 +100,7 @@
 // define VERBOSITY 3 includes everything.
 // Keep these levels in mind when adding new statements. Always use one of the _printN and _printlnN 
 // variants rather than calling Serial.print[ln]() directly.
-#define VERBOSITY 3
+#define VERBOSITY 2
 #if VERBOSITY >= 1
 #define _print1(x) Serial.print(x)
 #define _println1(x) Serial.println(x)
@@ -131,19 +131,36 @@
 // out all of the write capabilities. We had no interest in writing to the SD card, and yet they are 
 // linked in because the functions are called by other functions that handle both read and write.
 
+// Note that just not including a header file (via conditional compilation) is insufficient to prevent 
+// it from taking up space. Simply having a #include in this source file seems to indicate that the library
+// will be linked against, and if it contains any static data it will be linked in. If it contains static
+// classes (as does the SD library), then it will also include the code run by the constructor.
 #include <SPI.h>
 #if !DIAG_STANDALONE
 #include <Wire.h>
 #endif // !DIAG_STANDALONE
 #if featureSynth
+#if !featureCodec
 #include <SoftwareSerial.h>
+#endif // !featureCodec
 #endif // featureSynth
 #if featureCodec
 #include <Adafruit_VS1053.h>
 #include <SD.h>
 #endif // featureCodec
 #if featureServos
+#if (servo0Pin == 9 || servo0Pin == 10) && (servo1Pin == 9 || servo1Pin == 10)
+// We can use the PWM library if the servos are on pins 9 and 10. The PWM library is more compatible
+// with NeoPixels and also saves code (666 bytes) and data space (28 bytes).
 #include <Adafruit_TiCoServo.h> 
+#define SERVO_CLASS Adafruit_TiCoServo
+#else
+// Otherwise, we must use the standard Servo library. Note that just not including the header file
+// is insufficient to prevent it from taking up space because it defines static data which is always
+// linked in if the header is _found_ in the source file.
+#include <Servo.h>
+#define SERVO_CLASS Servo
+#endif
 #endif // featureServos
 #if featureNeoPix
 #include <Adafruit_NeoPixel.h>
@@ -164,13 +181,16 @@ class MidiCodecMode {
     bool wasPlaying;
 
   public:
-    MidiCodecMode() : musicPlayer( vs1053Reset, codecCs, codecDCs, codecDReq, codecCardCs ), wasPlaying( false ) {}
+    // We do not supply the hard-reset pin to the music player because we switch modes using a 
+    // soft reset. Our code will make sure it gets a good reset in the setup() routine. This 
+    // speeds up the transitions and reduces the clunks on the audio output.
+    MidiCodecMode() : musicPlayer( -1 /* vs1053Reset */, codecCs, codecDCs, codecDReq, codecCardCs ), wasPlaying( false ) {}
 
     bool enter() {
-      // We don't use resetVS1053 because the begin function below will do a reset. Simply drive
+      // We don't use setVS1053Mode because the begin function below does a soft reset. Simply drive
       // the GPIO 1 pin low so it will come up in Codec mode.
       digitalWrite( vs1053Mode, LOW );
-      // resetVS1053( false );
+      // setVS1053Mode( false );
 
       // initialise the music player. We do this every time we switch between modes because
       // it performs some initialization required following the reset.
@@ -241,6 +261,53 @@ class MidiCodecMode {
         wasPlaying = false;
       }
     }
+    Adafruit_VS1053& accessVS1053() { return( musicPlayer ); }
+    void softReset() {
+      musicPlayer.softReset();
+    }
+    void writeMidi( byte cmd, byte data1, byte data2 )
+    {
+      digitalWrite( codecDCs, LOW );
+      musicPlayer.spiwrite(0);
+      musicPlayer.spiwrite(cmd);
+      musicPlayer.spiwrite(0);
+      musicPlayer.spiwrite(data1);
+      if ( (cmd & 0xF0) <= 0xB0 || (cmd & 0xF0) == 0xE0) {
+        musicPlayer.spiwrite(0);
+        musicPlayer.spiwrite(data2);
+      }
+      digitalWrite( codecDCs, HIGH );
+    }
+    // Since we have vs1053Mode wired to the GPI0 1 pin on the VS1053, we can to a simple test
+    // that we can actually control it in both directions. Note that if the function is never 
+    // called, it doesn't take up any code space.
+    void testVS1053Gpio()
+    {
+      _println2( F("VS1053 GPIO pin test") );
+      Adafruit_VS1053& vs1053( musicPlayer );
+      vs1053.GPIO_pinMode( 1, 1 );
+      pinMode( vs1053Mode, INPUT );
+      vs1053.GPIO_digitalWrite( 1, 1 );
+      byte value = digitalRead( vs1053Mode );
+      _print2( F("- vs1053 1 -> Arduino ") ); _println2( value );
+      vs1053.GPIO_digitalWrite( 1, 0 );
+      value = digitalRead( vs1053Mode );
+      _print2( F("- vs1053 0 -> Arduino ") ); _println2( value );
+      vs1053.GPIO_digitalWrite( 1, 1 );
+      value = digitalRead( vs1053Mode );
+      _print2( F("- vs1053 1 -> Arduino ") ); _println2( value );
+      vs1053.GPIO_pinMode( 1, 0 );
+      pinMode( vs1053Mode, OUTPUT );
+      digitalWrite( vs1053Mode, 1 );
+      value = vs1053.GPIO_digitalRead( 1 );
+      _print2( F("- Arduino 1 -> vs1053 ") ); _println2( value );
+      digitalWrite( vs1053Mode, 0 );
+      value = vs1053.GPIO_digitalRead( 1 );
+      _print2( F("- vs1053 0 -> Arduino ") ); _println2( value );
+      digitalWrite( vs1053Mode, 1 );
+      value = vs1053.GPIO_digitalRead( 1 );
+      _print2( F("- Arduino 1 -> vs1053 ") ); _println2( value );
+    }
 };
 
 // usingAdaFruitMMS - determined during setup whether there is an AdaFruit Music Maker
@@ -257,6 +324,10 @@ void processCodecPlayTrack( byte cmd, const byte* data )
   // Command 2 is the CODEC Play Track.
   // Does nothing if not in CODEC mode. Data is track number. Looks for track in the root of the
   // SD card with the name trackNNN.*, and if found, attempts to play it.
+  if( !mp3CodecMode ) {
+    byte commandData[] = { 2 };
+    processMusicMode( 1, commandData );
+  }
   if( mp3CodecMode ) {
     char filename[16];
     strcpy( filename, "track" );
@@ -275,17 +346,6 @@ void processCodecPlayTrack( byte cmd, const byte* data )
       _print1( F("Error: Track not found ") ); _println1( filename );
     }
   }
-  else
-    _println2( F("Warn: Play track command while not in CODEC mode") );
-}
-void processCodecStatus( byte cmd, const byte* data )
-{
-  // Command 3 is the CODEC playback status [not yet functional]
-  // Data is unused. Sends back 1-byte containing 0 if not playing, non-zero if playing. Always returns zero if not in CODEC mode.
-  static byte counter = 1;
-  ++counter;
-  if ( counter >= 127 )
-    counter = 1;
 }
 void processCodecStop( byte cmd, const byte* data )
 {
@@ -298,7 +358,11 @@ void processCodecStop( byte cmd, const byte* data )
 
 #if featureSynth
 bool midiSynthMode = false;
+#if !featureCodec
+// If we are doing both Codec mode (which assumes the SPI interface to the VS1053) and Synth 
+// mode, then we can talk through the SPI/SDI interface to send data to real-time MIDI mode.
 SoftwareSerial VS1053_MIDI( 0, synthPin );
+#endif // !featureCodec
 
 #define VS1053_BANK_DEFAULT 0x00
 #define VS1053_BANK_DRUMS1 0x78
@@ -316,6 +380,9 @@ SoftwareSerial VS1053_MIDI( 0, synthPin );
 //Plays a MIDI note. Doesn't check to see that cmd is greater than 127, or that data values are less than 127
 void talkMIDI( byte cmd, byte data1, byte data2 )
 {
+#if featureCodec
+  VS1053_CODEC.writeMidi( cmd, data1, data2 );
+#else
   VS1053_MIDI.write( cmd );
   VS1053_MIDI.write( data1 );
 
@@ -323,80 +390,121 @@ void talkMIDI( byte cmd, byte data1, byte data2 )
   //(sort of: http://253.ccarh.org/handout/midiprotocol/)
   if ( (cmd & 0xF0) <= 0xB0 || (cmd & 0xF0) == 0xE0)
     VS1053_MIDI.write( data2 );
+#endif
 }
 void processMIDI( byte cmd, const byte* data )
 {
+  if( !midiSynthMode ) {
+    byte commandData[] = { 1 };
+    processMusicMode( 1, commandData );
+  }
   if( midiSynthMode ) {
     talkMIDI( cmd, data[0], data[1] );
   }
-  else 
-    _println2( F("Warn: MIDI command while not in synthesizer mode") );
 }
 #endif // featureSynth
 
 #if featureServos
 // This section contains global variables to maintain the state of the two servos.
-// These three defines control the range and the speed of both of the servos.
-#define SERVO_MIN -90
-#define SERVO_MAX 90
 
-// left_servo is the  servo object that controls the left servo/legs.
-// left_move is a flag that stores the current 'moving' state of the left servo/legs.
-// If true, the legs are continuously moved forward and then back. If false, then the
-// servo/legs is set to the center of its normal travel (position of 45).
-// left_pos holds the current position of the left servo/legs.
-// left_step holds how much the position is changed with each iteration. The sign of
-// the number indicates the direction. Currently either 1 or -1. It is changed when
-// the position reaches the desired limits of 0 and 90 degrees.
-#define FRAC_BITS 7
+// SERVO_INTERVAL is the rate, in msec, at which we calculate updated servo positions.
+// This is choosen to produce a smooth motion of the servo. Started at the SERVO_TIME_INTERVAL,
+// but that is too course and you can see/feel the servo step.
+// SERVO_TIME_INTERVAL is the units, in msec, used to specify the interval over which to
+// move the servo. This is choosen to give a reasonable range and resolution to the
+// specification of the movement. Range is 0 (now!) to 128 * 127 = 16.25 seconds.
+#define SERVO_INTERVAL 32
+#define SERVO_TIME_INTERVAL 128
+// FRAC_BITS is the number of bits used in our fixed-point arithmetic of the calculation of 
+// the position at each time interval.
+// HALF_FRAC is just the equivelent of one-step-below .5 in our fixed point system.
+#define FRAC_BITS 4
 #define HALF_FRAC ((1 << (FRAC_BITS-1))-1)
+
 struct servoData {
-  Adafruit_TiCoServo servo;
-  struct legData {
-      byte endPosition;
-      byte travelTime;
-  } legs[8];
-  // The current position, in fractional degrees.
+  SERVO_CLASS servo;
+  struct segmentData {
+      int8_t endPosition;
+      uint8_t travelTime;
+  } segments[8];
+  uint16_t minPulseWidth;
+  uint16_t maxPulseWidth;
+  // The current position, in usec (actual is MIN_PULSE_WIDTH + currentPosition).
   int16_t currentPosition;
-  // The step on each interval, in fractional degrees.
+  // The step on each interval, in fractional usec.
   int16_t stepsPerInterval;
   // The number of intervals until the current leg is completed.
-  byte intervalsRemaining;
-  // The current leg index into legs.
-  byte currentLeg;
-  // The number of valid entries in legs.
-  byte numLegs;
-  // The number of times remaining to repeat legs, or 0xff if forever.
+  int16_t intervalsRemaining;
+  // 
+  // The current leg index into segments.
+  byte currentSegment;
+  // The number of valid entries in segments.
+  byte numSegments;
+  // The number of times remaining to repeat segments, or 0xff if forever.
   byte cyclesRemaining;
-
-  void set( byte position ) {
-    currentPosition = (int16_t)position << FRAC_BITS;
-    servo.write( (currentPosition + HALF_FRAC) >> FRAC_BITS );
+  // If true, then travelTime is actually 0..100% of max speed (.25 s/60 deg).
+  bool specifyDelta;
+  bool specifySpeed;
+  
+  void set( int8_t position ) {
+    // currentPosition = ((int16_t) (maxPulseWidth - minPulseWidth) * position / 180) << FRAC_BITS;
+    position = constrain( position, -90, 90 );
+    currentPosition = map( position, -90, 90, 0, (maxPulseWidth - minPulseWidth) ) << FRAC_BITS;
+    uint16_t pulseWidth = minPulseWidth + ((currentPosition + HALF_FRAC) >> FRAC_BITS);
+    // _print3( F("set ") ); _println3( pulseWidth );
+    servo.write( pulseWidth );
+  }
+  int8_t get() const {
+    int8_t position = map( (currentPosition + HALF_FRAC) >> FRAC_BITS, 0, (maxPulseWidth - minPulseWidth), -90, 90 );
+    return( position );
   }
   void stop()
   {
-    currentLeg = 0;
-    numLegs = 0;
+    currentSegment = 0;
+    numSegments = 0;
     intervalsRemaining = 0;
     cyclesRemaining = 0;
   }
-  void addLeg( byte position, byte interval ) {
-    if( numLegs >= sizeof(legs) / sizeof(legs[0]) ) {
-      _println1( F("Error: exceeded max servo legs") );
+  void setMode( bool byDelta, bool bySpeed ) {
+    specifyDelta = byDelta;
+    specifySpeed = bySpeed;
+  }
+  void addSegment( int8_t position, byte interval ) {
+    if( numSegments >= sizeof(segments) / sizeof(segments[0]) ) {
+      _println1( F("Error: exceeded max servo segments") );
       return;
     }
-    legs[numLegs].endPosition = position;
-    legs[numLegs].travelTime = interval; // in 128 mSec intervals.
-    _print2( F("leg ") ); _print2( numLegs ); _print2( F(" end ") ); _print2( legs[numLegs].endPosition ); _print2( F(" time ") ); _println2( legs[numLegs].travelTime );
-    ++numLegs;
+    position = constrain( position, -90, 90 );
+    segments[numSegments].endPosition = position;
+    segments[numSegments].travelTime = interval; // in 128 mSec intervals.
+    // _print2( F("add segment ") ); _print2( numSegments ); _print2( F(" end ") ); _print2( segments[numSegments].endPosition ); _print2( F(" time ") ); _println2( segments[numSegments].travelTime );
+    ++numSegments;
   }
-  void setupLeg()
+  void setupSegment()
   {
-    int16_t steps = ((int16_t)legs[currentLeg].endPosition << FRAC_BITS) - currentPosition;
-    byte intervals = legs[currentLeg].travelTime;
-    stepsPerInterval = (steps >= 0 ? steps + (intervals >> 1) : steps - (intervals >> 1)) / intervals; 
-    intervalsRemaining = legs[currentLeg].travelTime;
-    _print2( F("leg ") ); _print2( currentLeg ); _print2( F(" steps ") ); _print2( stepsPerInterval ); _print2( F(" intervals ") ); _println2( intervalsRemaining );
+    int16_t newPosition = map( segments[currentSegment].endPosition, -90, 90, 0, (maxPulseWidth - minPulseWidth) ) << FRAC_BITS;
+    int16_t steps = newPosition - currentPosition;
+    if( specifySpeed ) {
+      // We define 100 to be 60 degrees in 256 mSec. Since the range of pulse widths represents 180 degrees,
+      // then 1/3 of the range is the equivelent number of usecs.
+      stepsPerInterval = (int16_t) (((maxPulseWidth - minPulseWidth) / 3) << FRAC_BITS) / (256 / SERVO_INTERVAL);
+      // At the time of this writing, stepsPerInterval comes out to be 960. If we just do 960 * N / 100,
+      // it overflows because 96000 (the maximum) does't fit in a 16-bit signed number. But since we know
+      // that it is a constant ending in a zero, we can divide it down once before the multiply, still fit
+      // within 16 bits, and 
+      stepsPerInterval = ((stepsPerInterval / 10) * segments[currentSegment].travelTime) / 10;
+      if( steps < 0 )
+        stepsPerInterval = -stepsPerInterval;
+      intervalsRemaining = steps / stepsPerInterval;
+      if( intervalsRemaining <= 0 )
+        intervalsRemaining = 1;
+    }
+    else {
+      int16_t intervals = segments[currentSegment].travelTime * (SERVO_TIME_INTERVAL / SERVO_INTERVAL);
+      stepsPerInterval = (steps >= 0 ? steps + (intervals >> 1) : steps - (intervals >> 1)) / intervals; 
+      intervalsRemaining = intervals;
+    }
+    _print3( F("setup segment ") ); _print3( currentSegment ); _print3( F(" steps ") ); _print3( stepsPerInterval ); _print3( F(" intervals ") ); _println3( intervalsRemaining );
   }
   void interval()
   {
@@ -406,26 +514,27 @@ struct servoData {
       // Have we reached the end of the current leg?
       if( intervalsRemaining == 0 ) {
         // Then use the exact end position specified (in case of accumulated error).
-        currentPosition = (int16_t)legs[currentLeg].endPosition << FRAC_BITS;
-        // Have we reached the end of the specified legs?
-        ++currentLeg;
-        if( currentLeg >= numLegs ) {
-          currentLeg = 0;
+        currentPosition = map( segments[currentSegment].endPosition, -90, 90, 0, (maxPulseWidth - minPulseWidth) ) << FRAC_BITS;
+        // Have we reached the end of the specified segments?
+        ++currentSegment;
+        if( currentSegment >= numSegments ) {
+          currentSegment = 0;
           if( cyclesRemaining != 0xff )
             --cyclesRemaining;
         }
         if( cyclesRemaining != 0 )
-          setupLeg();
+          setupSegment();
       }
       else {
         currentPosition += stepsPerInterval;
       }
-      _println2(currentPosition);
-      servo.write( (currentPosition + HALF_FRAC) >> FRAC_BITS );
+      uint16_t pulseWidth = minPulseWidth + ((currentPosition + HALF_FRAC) >> FRAC_BITS);
+      // _print3( F("int ") ); _println3( pulseWidth );
+      servo.write( pulseWidth );
     }
   }
+  servoData() : minPulseWidth( MIN_PULSE_WIDTH ), maxPulseWidth( MAX_PULSE_WIDTH ) {}
 } servos[2];
-int servoDelay = 128;
 
 void processServos()
 {
@@ -434,29 +543,83 @@ void processServos()
     servo.interval();
   }
 }
-void processServoSegment( byte cmd, const byte* data )
-{
-  struct servoData& servo( servos[data[0] & 0x1] );
-  if( cmd == 10 )
-    servo.stop();
-  servo.addLeg( data[1], data[2] );
-  if( cmd == 12 ) {
-    servo.cyclesRemaining = 1;
-    servo.setupLeg();
-  }
-}
-void processServoStop( byte cmd, const byte* data )
+void processServoMoveTime( byte cmd, const byte* data )
 {
   struct servoData& servo( servos[data[0] & 0x1] );
   servo.stop();
+  if( data[2] > 0 ) {
+    // data[1] is position in degrees 0..180 (for now). Our servo class works in 
+    // degrees from -90..90.
+    servo.setMode( false, false );
+    int8_t position = (int8_t) (data[1] - 90);
+    servo.addSegment( position, data[2] );
+    servo.cyclesRemaining = 1;
+    servo.setupSegment();
+  }
+  else {
+    servo.set( data[1] );
+  }
+}
+void processServoMoveSpeed( byte cmd, const byte* data )
+{
+  struct servoData& servo( servos[cmd - 10] );
+  servo.stop();
+  // data[1] is speed, in percent of maximum from 0..100.
+  if( data[1] > 0 ) { // zero speed is nonsensical.
+    servo.setMode( false, true );
+    // data[0] is position in degrees -90..90 with an offset of 128 so it 
+    // works in an unsigned 8-bit value. Our servo class works in degrees
+    // from -90..90. 
+    int8_t position = (data[0] - 128);
+    servo.addSegment( position, data[1] );
+    servo.cyclesRemaining = 1;
+    servo.setupSegment();
+  }
+}
+void processServoMoveDeltaSpeed( byte cmd, const byte* data )
+{
+  struct servoData& servo( servos[cmd - 8] );
+  servo.stop();
+  // data[1] is speed, in percent of maximum from 0..100.
+  if( data[1] > 0 ) { // zero speed is nonsensical.
+    servo.setMode( false, true );
+    // data[0] is degrees to move -128..127 with an offset of 128 so it 
+    // works in an unsigned 8-bit value.
+    int8_t delta = (data[0] - 128);
+    // This is only a partial solution to the 'delta' problem. A real solution
+    // will involve storing the delta in the segments. But since all we are 
+    // supporting at the moment is a simple (single) move, this works.
+    int16_t position = servo.get();
+    position += delta;
+    position = constrain( position, -90, 90 );
+    servo.addSegment( (int8_t) position, data[1] );
+    servo.cyclesRemaining = 1;
+    servo.setupSegment();
+  }
+}
+void processServoSegment( byte cmd, const byte* data )
+{
+  struct servoData& servo( servos[data[0] & 0x1] );
+  if( cmd == 14 ) {
+    servo.stop();
+    servo.setMode( false, false );
+  }
+  servo.addSegment( (int8_t) (data[1] - 90), data[2] > 0 ? data[2] : 1 );
+}
+void processServoExecute( byte cmd, const byte* data )
+{
+  struct servoData& servo( servos[data[0] & 0x1] );
+  servo.cyclesRemaining = data[1];
+  if( servo.cyclesRemaining > 0 ) {
+    servo.setupSegment();
+  }
 }
 void processServoReset()
 {
   for( byte i = 0; i < 2; ++i ) {
     struct servoData& servo( servos[i] );
     servo.stop();
-    servo.currentPosition = (int16_t)90 << FRAC_BITS;
-    servo.servo.write( (servo.currentPosition + HALF_FRAC) >> FRAC_BITS );
+    servo.set( 0 );
   }
 }
 #endif // featureServos
@@ -683,22 +846,30 @@ void processNeoPixReset()
 }
 #endif // featureNeoPix
 
-#if defined( vs1053Reset ) && defined( vs1053Mode )
 // This function performs a reset of the VS1053 and brings it up in the specified
 // mode. If 'midiSynth' is true, then it drives the GPIO 1 pin on the VS1053 high during
 // the reset, which causes it to come up in MIDI Synthesizer mode. Otherwise, it drives
 // GPIO 1 low during the reset, which brings it up in the Codec mode.
-void resetVS1053( bool midiSynth )
+void setVS1053Mode( bool midiSynth )
 {
-  //Reset the VS1053
-  pinMode( vs1053Mode, OUTPUT );
+#if defined( vs1053Mode )
+#if featureCodec
+  // If we are doing both Codec mode (which requires the SPI interface to the VS1053), then
+  // we can simply do a soft-reset (which goes through the SPI/SCI interface) to switch it between
+  // Codec mode and real-time MIDI mode.
   digitalWrite( vs1053Mode, (midiSynth ? HIGH : LOW) ); // high brings it up in MIDI mode
+  VS1053_CODEC.softReset();
+  // VS1053_CODEC.testVS1053Gpio();
+#elif defined( vs1053Reset )
+  //Reset the VS1053. Not really useful at this point.
   digitalWrite( vs1053Reset, LOW );
+  digitalWrite( vs1053Mode, (midiSynth ? HIGH : LOW) ); // high brings it up in MIDI mode
   delay(100);
   digitalWrite( vs1053Reset, HIGH );
   delay(100);
+#endif
+#endif
 }
-#endif // defined( vs1053Reset ) && defined( vs1053Mode )
 void processMusicMode( byte cmd, const byte* data )
 {
   // Command 1 is the Music mode.
@@ -725,11 +896,11 @@ void processMusicMode( byte cmd, const byte* data )
 #if featureSynth
     if( !midiSynthMode ) {
       _println2( F("Turning on MIDI SYNTH mode") );
-#if defined( vs1053Reset ) && defined( vs1053Mode )
       // Put into MIDI synthesizer mode.
-      resetVS1053( true );
-#endif // defined( vs1053Reset ) && defined( vs1053Mode )
+      setVS1053Mode( true );
+#if !featureCodec
       VS1053_MIDI.begin( 31250 ); // MIDI uses a 'strange baud rate'
+#endif // !featureCodec
 
       talkMIDI( MIDI_CHAN_MSG | 0, MIDI_CHAN_BANK, VS1053_BANK_MELODY );
       talkMIDI( MIDI_CHAN_PROGRAM | 0, VS1053_GM1_OCARINA, 0 );
@@ -747,10 +918,10 @@ void processMusicMode( byte cmd, const byte* data )
         _println2( F("Turning on CODEC mode") );
         mp3CodecMode = VS1053_CODEC.enter();
       }
-      else if( !sdCardPresent )
-        _println1( F("Error: SD card not present") );
-      else
+      else if( !usingAdaFruitMMS )
         _println1( F("Error: AdaFruit Music Maker Shield not present") );
+      else
+        _println1( F("Error: SD card not present") );
     }
 #else
     _println1( F("Error: Codec commands not supported by this build") );
@@ -810,11 +981,11 @@ void processReset( byte cmd, const byte* data )
 }
 void processTest( byte cmd, const byte* data )
 {
-  _print2( F("Test cmd ") ); _print2( cmd );
+  _print3( F("Test cmd ") ); _print3( cmd );
   for( int i = 0; i < 5; i++ ) {
-    _print2( F(" ") ); _print2( data[i] );
+    _print3( F(" ") ); _print3( data[i] );
   }
-  _println2( F("") );
+  _println3( F("") );
 }
 void processUnrecognized( byte cmd, const byte* data )
 {
@@ -826,6 +997,7 @@ void processUnrecognized( byte cmd, const byte* data )
 // cmdQueueRead is the next index at which a byte will be read.
 // So cmdQueueRead == cmdQueueWrite means the queue is empty.
 // and cmdQueueRead == (cmdQueueWrite + 1) % sizeof(cmdQueue) means the queue is full.
+// It's capacity in bytes is one less than the specified size of queue.
 struct xferQueue {
   byte queue[32];
   byte writeIdx;
@@ -869,6 +1041,9 @@ struct xferQueue {
     else
       return ( writeIdx + sizeof(queue) - readIdx );
   }
+  inline byte free() {
+    return( sizeof(queue) - 1 - bytes() );
+  }
   inline bool overflow() {
     bool data = overflowOccured;
     overflowOccured = false;
@@ -894,30 +1069,33 @@ void showCapabilities()
 #endif // DIAG_STANDALONE
 
 #if featureCodec
-  _println2( F("Codec support for AdaFruit Music Maker Shield.") );
-  _println2( F("- supports .mp3 and .mid files.") );
+  _println2( F("Codec support for AdaFruit Music Maker Shield using SPI.") );
   if( usingAdaFruitMMS ) {
     _println2( F("- detected AdaFruit Music Maker Shield") );
-    if ( sdCardPresent )
-      _println2( F("- detected SD card") );
+  }
+  if ( sdCardPresent ) {
+    _println2( F("- detected SD card") );
   }
 #endif // featureCodec
 
 #if featureSynth
-  _print2( F("MIDI synthesizer support on pin ") ); _println2( synthPin );
-  _println2( F("- supports AdaFruit Music Maker Shield OR SparkFun Music Instrument Shield") );
+#if featureCodec
+  _println2( F("MIDI synthesizer support using SPI/SDI") );
+#else
+  _print2( F("MIDI synthesizer support using serial on pin ") ); _println2( synthPin );
+#endif
 #endif // featureSynth
 
-#if defined( vs1053Mode ) && defined( vs1053Reset )
-  _print2( F("Switching music modes requires RST on pin ") ); _print2( vs1053Reset ); _print2( F(" and GPIO1 to pin ") ); _println2( vs1053Mode );
-#endif // defined( vs1053Mode ) && defined( vs1053Reset )
+#if defined( vs1053Mode )
+  _print2( F("Switching music modes requires GPIO1 to pin ") ); _println2( vs1053Mode );
+#endif // defined( vs1053Mode )
 
 #if featureServos
   _print2( F("Servo support for servos on pin ") ); _print2( servo0Pin ); _print2( F( " and pin ") ); _println2( servo1Pin );
 #endif // featureServos
 
 #if featureNeoPix
-  _print2( F("NeoPixel support for strips on pin ") ); _print2( neoPix0Pin ); _print2( F(" and pin ") ); _println2( neoPix1Pin );
+  _print2( F("Led support for strips on pin ") ); _print2( neoPix0Pin ); _print2( F(" and pin ") ); _println2( neoPix1Pin );
 #endif // featureNeoPix
 }
 
@@ -938,12 +1116,6 @@ void setup()
   timer.setInterval( 10000, processCmdQueueCheck );
 #endif // DIAG_QUEUE
 
-#if defined( vs1053Mode ) && defined( vs1053Reset )
-  // These pins are used to control the VS1053 on the AdaFruit shield, so must be output.
-  pinMode( vs1053Mode, OUTPUT );
-  pinMode( vs1053Reset, OUTPUT );
-#endif
-
 #if featureNeoPix
   // This preceedes the VS1053 initialization (which can take a half second) just so that the
   // lights are turned off as soon as possible if present.
@@ -954,11 +1126,24 @@ void setup()
   processNeoPixReset();
 #endif // featureNeoPix
 
+  // The vs1053Mode pins in used to change the mode of the VS1053, so must be output.
+#if defined( vs1053Mode )
+  pinMode( vs1053Mode, OUTPUT );
+#endif
+#if defined( vs1053Reset )
+  // If we have a reset line to the VS1053, then give it a nice reset.
+  digitalWrite( vs1053Reset, LOW );
+  pinMode( vs1053Reset, OUTPUT );
+  delay( 100 );
+  digitalWrite( vs1053Reset, HIGH );
+  // delay( 100 ) not necessary because the .enter() below has one.
+#endif // defined( vs1053Reset ) && vs1053Reset != -1
+
 #if featureCodec
   // If we can enter CODEC mode, then we interpret that to mean that we are running with
   // the AdaFruit Music Maker Shield.
   usingAdaFruitMMS = VS1053_CODEC.enter();
-  VS1053_CODEC.exit();
+  // VS1053_CODEC.exit(); not necessary since we know we haven't played anything.
   if( usingAdaFruitMMS ) {
     // It is possible that a different shield is present that supports the SD card, but for
     // now we only look if the AdaFruit shield is present.
@@ -974,10 +1159,10 @@ void setup()
 #endif // featureSynth
 
 #if featureServos
-  servos[0].servo.attach( servo0Pin );  // attaches the servo object to the appropriate pin.
-  servos[1].servo.attach( servo1Pin );
+  servos[0].servo.attach( servo0Pin, MIN_PULSE_WIDTH + 130, MAX_PULSE_WIDTH - 130 );  // attaches the servo object to the appropriate pin.
+  servos[1].servo.attach( servo1Pin, MIN_PULSE_WIDTH + 130, MAX_PULSE_WIDTH - 130 );
   processServoReset();
-  timer.setInterval( servoDelay, processServos );
+  timer.setInterval( SERVO_INTERVAL, processServos );
 #endif // featureServos
 
   showCapabilities();
@@ -1064,14 +1249,17 @@ static const struct {
   { 4, 1, processMusicVolume },
 #if featureCodec
   { 2, 1, processCodecPlayTrack },
-  { 3, 1, processCodecStatus },
   { 5, 1, processCodecStop },
 #endif // featureCodec
 #if featureServos
-  { 10, 3, processServoSegment },
-  { 11, 3, processServoSegment },
-  { 12, 3, processServoSegment },
-  { 15, 1, processServoStop },
+  { 8, 2, processServoMoveDeltaSpeed }, // servo is low bit of command.
+  { 9, 2, processServoMoveDeltaSpeed }, // servo is low bit of command.
+  { 10, 2, processServoMoveSpeed }, // servo is low bit of command.
+  { 11, 2, processServoMoveSpeed }, // servo is low bit of command.
+  { 13, 3, processServoMoveTime },
+  { 14, 3, processServoSegment },
+  { 15, 3, processServoSegment },
+  { 16, 3, processServoExecute },
 #endif // featureServos
 #if featureNeoPix
   { 20, 3, processNeoPixConfig },
@@ -1140,7 +1328,14 @@ void processCmdQueue()
       for ( byte i = dataBytes; i < sizeof(data); ++i )
         data[i] = 0;
 
-      // _print2( F("Processing cmd ") ); _println2( cmd );
+#if VERBOSITY >= 3
+      _print3( F("Processing cmd ") ); _print3( cmd );
+      for( byte i = 0; i < dataBytes; ++i ) {
+        _print3( F(", ") ); _print3( data[i] );
+      }
+      _println3( F("") );
+#endif // VERBOSITY >= 3
+
       // now that we have the data bytes collected, invoke the processing function.
       (*cmdFunc)( cmd, data );
   
@@ -1184,15 +1379,18 @@ static const struct {
 #if featureNeoPix
   { 100,   3, { 20, 0, 8, 127, 0 } },   // Configure Leds 0
   { 0,     3, { 20, 1, 8, 127, 0 } },   // Configure Leds 1
-  { 100,   5, { 24, 0, 0, 127, 10, 10, 0 } },
+  { 0,     5, { 24, 0, 0, 127, 10, 10, 0 } },
   { 0,     5, { 25, 0, 7, 10, 10, 127, 0 } },
   { 0,     3, { 31, 0, 1, 32, 0 } },    // Walk Leds
 #endif // featureNeoPix
 #if featureServos
-  { 100,   3, { 10, 0, 135, 20, 0 } },   // Servo start segment
-  { 100,   3, { 11, 0,  90, 40, 0 } },   // Servo add segment
-  { 100,   3, { 11, 0,  45, 20, 0 } },   // Servo add segment
-  { 100,   3, { 12, 0,  90, 40, 0 } },   // Servo run segment
+  { 100,   3, { 14, 0, 160, 20, 0 } },   // Servo start path
+  { 0,     3, { 15, 0, 160, 10, 0 } },   // Servo add segment
+  { 0,     3, { 15, 0,  90, 40, 0 } },   // Servo add segment
+  { 0,     3, { 15, 0,  20, 20, 0 } },   // Servo add segment
+  { 0,     3, { 15, 0,  20, 10, 0 } },   // Servo add segment
+  { 0,     3, { 15, 0,  90, 40, 0 } },   // Servo add segment
+  { 0,     3, { 16, 0, 127, 0 } },       // Servo execute path
 #endif // featureServos
 #if featureCodec
   { 100,   1, { 1, 2, 0 } },            // Track mode
@@ -1204,7 +1402,7 @@ static const struct {
 #endif // featureNeoPix
   { 20000, 1, { 5, 0, 0 } },            // Stop track
 #if featureServos
-  { 100,   3, { 10, 0, 45, 40, 0 } },    // Servo segment
+  { 0,     3, { 16, 0, 0, 0 } },        // Servo stop path
 #endif // featureServos
   { 100,   1, { 2, 2, 0 } },            // Play track 2
 #if featureNeoPix
@@ -1214,7 +1412,8 @@ static const struct {
 #endif // featureNeoPix
   { 20000, 1, { 5, 0, 0 } },
 #if featureServos
-  { 100,   3, { 10, 0, 90, 10, 0 } },    // Servo segment
+  // { 100,   3, { 13, 0, 45, 0, 0 } },   // Servo move
+  { 100,   2, { 10, -45 + 128, 100, 0 } },   // Servo move
 #endif // featureServos
   { 100,   1, { 2, 3, 0 } },            // Play track 3
 #if featureNeoPix
@@ -1223,6 +1422,11 @@ static const struct {
   { 0,     1, { 21, 1, 0 } },           // Show Led 1
 #endif // featureNeoPix
   { 20000, 1, { 5, 0, 0 } },
+#if featureServos
+  // { 100,   3, { 13, 0, 135, 0, 0 } },    // Servo move
+  // { 100,   2, { 10, 45 + 128, 50, 0 } },    // Servo move
+  { 100,   2, { 8, 90 + 128, 50, 0 } },    // Servo move
+#endif // featureServos
   { 100,   1, { 2, 4, 0 } },            // Play track 4
 #if featureNeoPix
   { 100,   5, { 26, 1, 0, 10, 127, 10 } }, // Leds 1 to green
@@ -1238,9 +1442,9 @@ static const struct {
   { 0,     5, { 26, 1, 0, 127, 10, 10 } }, // Leds 1 to red
 #endif // featureNeoPix
 #if featureServos
-//  { 100,   1, { 11, 31, 0 } },          // Servo speed
-//  { 0,     1, { 12, 2, 0 } },           // Servo direction
-//  { 0,     1, { 10, 2, 0 } },           // Servo move 1
+  // { 100,   3, { 13, 0, 90, 0, 0 } },    // Servo move
+  // { 100,   2, { 10, 0 + 128, 25, 0 } },    // Servo move
+  { 100,   2, { 8, -45 + 128, 25, 0 } },    // Servo move
 #endif // featureServos
 #if featureSynth
   { 100,   1, { 1, 1, 0 } },            // Note mode
@@ -1272,6 +1476,10 @@ void processTestScript()
   uint16_t delay = 0;
   do {
     byte dataBytes = pgm_read_byte_near( &testScript[testScriptIndex].dataBytes );
+    // Not enough space, so bail out of this iteration. Note it is ok if delay == 0 in the 
+    // setTimeout below - our routine will just be called again in the next run.
+    if( dataBytes + 1 > cmdQueue.free() )
+      break;
     for( byte i = 0; i <= dataBytes; ++i )
       cmdQueue.push_back( pgm_read_byte_near( &testScript[testScriptIndex].bytes[i] ) );
     ++testScriptIndex;
