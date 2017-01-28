@@ -1,5 +1,7 @@
 //  "EV3ArduinoExtensions"
 
+#define VERSION "1.2"
+
 // Set one of the following to '1' to select which configuration to build for. These each
 // represent one of the configurations that we are currently using. More can certainly be added
 // as desired. All assume the EV3 interface (since that is the whole reason this code exists).
@@ -64,13 +66,11 @@
 #define codecDReq 7    // VS1053 Data request, ideally an Interrupt pin
 #define featureSynth 1
 #define synthPin 5
-#define featureServos 1
+#define featureServos 0 // was 1
 #define servo0Pin 8
-// #define servo1Pin 9
-#define servo1Pin 6
+#define servo1Pin 9
 #define featureNeoPix 1
-// #define neoPix0Pin 6
-#define neoPix0Pin 9
+#define neoPix0Pin 6
 #define neoPix1Pin 10
 
 #elif ProMicro
@@ -99,7 +99,7 @@
 // define VERBOSITY 3 includes everything.
 // Keep these levels in mind when adding new statements. Always use one of the _printN and _printlnN 
 // variants rather than calling Serial.print[ln]() directly.
-#define VERBOSITY 2
+#define VERBOSITY 3
 #if VERBOSITY >= 1
 #define _print1(x) Serial.print(x)
 #define _println1(x) Serial.println(x)
@@ -122,6 +122,8 @@
 #define _println3(x)
 #endif
 
+#define DIAG_QUEUE 0
+
 // Memory saving steps.
 // In addition to the above VERBOSITY setting, I had to modify the SD library to allow it to compile
 // out all of the write capabilities. We had no interest in writing to the SD card, and yet they are 
@@ -137,7 +139,7 @@
 #include <SD.h>
 #endif // featureCodec
 #if featureServos
-#include <Servo.h>
+// #include <Servo.h>
 #endif // featureServos
 #if featureNeoPix
 #include <Adafruit_NeoPixel.h>
@@ -198,10 +200,9 @@ class MidiCodecMode {
     void stop() {
       if ( !musicPlayer.stopped() )
       {
-        _print2(F("Stopping playback..."));
+        _println2(F("Stopping playback"));
         musicPlayer.stopPlaying();
         wasPlaying = false;
-        _println2(F("stopped"));
       }
     }
 
@@ -322,6 +323,7 @@ void talkMIDI( byte cmd, byte data1, byte data2 )
 void processMIDI( byte cmd, const byte* data )
 {
   if( midiSynthMode ) {
+    _print3( F("midi ") ); _print3( cmd ); _print3( F(" bytes ") ); _print3( data[0] ); _print3( F(" ") ); _println3( data[1] );
     talkMIDI( cmd, data[0], data[1] );
   }
   else 
@@ -369,17 +371,22 @@ void processServos()
       else if( servo.pos <= SERVO_MIN ) {
         servo.step = SERVO_STEP;
       }
+      // tell servo to go to the newly calculated position in variable 'left_pos'
+      servo.servo.write( servo.pos );
     }
-    else {
-      // If we are not moving the left servo/legs, then set the position to the
-      // center of the desired range.
-      servo.pos = (SERVO_MAX + SERVO_MIN) / 2;
-    }
-    // tell servo to go to the newly calculated position in variable 'left_pos'
-    servo.servo.write( servo.pos );
   }
 }
 
+void updateServoTimer()
+{
+  if( servoTimerId != -1 ) {
+    timer.deleteTimer( servoTimerId );
+    servoTimerId = -1;
+  }
+  if( servos[0].move || servos[1].move ) {
+    servoTimerId = timer.setInterval( servoDelay, processServos );
+  }
+}
 void processServoMove( byte cmd, const byte* data )
 {
   // Command 10 is the SERVO/Legs command. Data is interpreted as a bit field where
@@ -391,8 +398,15 @@ void processServoMove( byte cmd, const byte* data )
   //  2 - turns the left side off and the right side on.
   //  3 - turns on both sides.
   // Of course, you can define other protocols as well (and it won't hurt my feelings).
-  servos[0].move = ( (data[0] & 1) != 0 );
-  servos[1].move = ( (data[0] & 2) != 0 );
+  for( byte i = 0; i < 2; ++i ) {
+    struct servoData& servo( servos[i] );
+    servos[i].move = ( (data[0] & (1 << i)) != 0 );
+    if( !servos[i].move ) {
+      servo.pos = (SERVO_MAX + SERVO_MIN) / 2;
+      servo.servo.write( servo.pos );
+    }
+  } 
+  updateServoTimer();
 }
 void processServoSpeed( byte cmd, const byte* data )
 {
@@ -402,8 +416,7 @@ void processServoSpeed( byte cmd, const byte* data )
   servoDelay = (128 - data[0]);
   if ( servoDelay < 2 ) servoDelay = 2;
   else if ( servoDelay > 200 ) servoDelay = 200;
-  timer.deleteTimer( servoTimerId );
-  servoTimerId = timer.setInterval( servoDelay, processServos );
+  updateServoTimer();
 }
 void processServoDirection( byte cmd, const byte* data )
 {
@@ -412,20 +425,22 @@ void processServoDirection( byte cmd, const byte* data )
   // significant bit (1) sets the direction for the right side. If the bit is zero, the servo
   // starts in the 'positive' direction, and if 1 in the negative direction. Of course, once
   // the servo reaches the end of its range, it reverses direction.
-  servos[0].step = ( (data[0] & 1) != 0 ? -SERVO_STEP : SERVO_STEP );
-  servos[1].step = ( (data[0] & 2) != 0 ? -SERVO_STEP : SERVO_STEP );
+  for( byte i = 0; i < 2; ++i ) {
+    struct servoData& servo( servos[i] );
+    servos[i].step = ( (data[0] & (1 << i)) != 0 ? -SERVO_STEP : SERVO_STEP );
+  }
 }
 void processServoReset()
 {
   for( byte i = 0; i < 2; ++i ) {
     struct servoData& servo( servos[i] );
     servo.move = false;
+    servo.pos = (SERVO_MAX + SERVO_MIN) / 2;
     servo.step = (i == 0 ? SERVO_STEP : -SERVO_STEP);
-    servo.servo.write( servo.step );
+    servo.servo.write( servo.pos );
   }
   servoDelay = 15;
-  timer.deleteTimer( servoTimerId );
-  servoTimerId = timer.setInterval( servoDelay, processServos );
+  updateServoTimer();
 }
 #endif // featureServos
 
@@ -688,7 +703,7 @@ void processMusicMode( byte cmd, const byte* data )
   if( data[0] == 1 ) {
 #if featureSynth
     if( !midiSynthMode ) {
-      _print2( F("Turning on MIDI SYNTH mode...") );
+      _println2( F("Turning on MIDI SYNTH mode") );
 #if defined( vs1053Reset ) && defined( vs1053Mode )
       // Put into MIDI synthesizer mode.
       resetVS1053( true );
@@ -699,7 +714,6 @@ void processMusicMode( byte cmd, const byte* data )
       talkMIDI( MIDI_CHAN_PROGRAM | 0, VS1053_GM1_OCARINA, 0 );
       talkMIDI( MIDI_CHAN_MSG | 0, MIDI_CHAN_VOLUME, 127 );
       midiSynthMode = true;
-      _println2( F(" done") );
     }
 #else
     _println1( F("Error: MIDI commands not supported by this build") );
@@ -709,10 +723,8 @@ void processMusicMode( byte cmd, const byte* data )
 #if featureCodec
     if ( !mp3CodecMode ) {
       if ( usingAdaFruitMMS && sdCardPresent ) {
-        _print2( F("Turning on CODEC mode...") );
-        VS1053_CODEC.enter();
-        mp3CodecMode = true;
-        _println2( F(" done") );
+        _println2( F("Turning on CODEC mode") );
+        mp3CodecMode = VS1053_CODEC.enter();
       }
       else if( !sdCardPresent )
         _println1( F("Error: SD card not present") );
@@ -775,9 +787,6 @@ void processReset( byte cmd, const byte* data )
   // while running setup, so you never see it. Now I dump it out on each reset default state.
   showCapabilities();
 }
-// void processNop( byte cmd, const byte* data )
-// {
-// }
 void processTest( byte cmd, const byte* data )
 {
   _print2( F("Test cmd ") ); _print2( cmd );
@@ -791,101 +800,6 @@ void processUnrecognized( byte cmd, const byte* data )
   _print1( F("Error: Unrecognized command ") ); _println1(cmd);
 }
 
-void showCapabilities()
-{
-  _println1( F("EV3 Arduino Extensions - " __DATE__ " " __TIME__) );
-
-#if featureCodec
-  _println2( F("Codec support for AdaFruit Music Maker Shield.") );
-  _println2( F("- supports .mp3 and .mid files.") );
-  if( usingAdaFruitMMS ) {
-    _println2( F("- detected AdaFruit Music Maker Shield") );
-    if ( sdCardPresent )
-      _println2( F("- detected SD card") );
-  }
-#endif // featureCodec
-
-#if featureSynth
-  _print2( F("MIDI synthesizer support on pin ") ); _println2( synthPin );
-  _println2( F("- supports AdaFruit Music Maker Shield OR SparkFun Music Instrument Shield") );
-#endif // featureSynth
-
-#if defined( vs1053Mode ) && defined( vs1053Reset )
-  _print2( F("Switching music modes requires RST on pin ") ); _print2( vs1053Reset ); _print2( F(" and GPIO1 to pin ") ); _println2( vs1053Mode );
-#endif // defined( vs1053Mode ) && defined( vs1053Reset )
-
-#if featureServos
-  _print2( F("Servo support for servos on pin ") ); _print2( servo0Pin ); _print2( F( " and pin ") ); _println2( servo1Pin );
-#endif // featureServos
-
-#if featureNeoPix
-  _print2( F("NeoPixel support for strips on pin ") ); _print2( neoPix0Pin ); _print2( F(" and pin ") ); _println2( neoPix1Pin );
-#endif // featureNeoPix
-}
-
-void setup()
-{
-#if VERBOSITY
-  Serial.begin(115200);
-#endif // VERBOSITY
-
-  Wire.begin( ardAdd );
-  Wire.onReceive( receiveData );
-  Wire.onRequest( requestData );
-
-#if defined( vs1053Mode ) && defined( vs1053Reset )
-  // These pins are used to control the VS1053 on the AdaFruit shield, so must be output.
-  pinMode( vs1053Mode, OUTPUT );
-  pinMode( vs1053Reset, OUTPUT );
-#endif
-
-#if featureCodec
-  // If we can enter CODEC mode, then we interpret that to mean that we are running with
-  // the AdaFruit Music Maker Shield.
-  usingAdaFruitMMS = VS1053_CODEC.enter();
-  VS1053_CODEC.exit();
-  if( usingAdaFruitMMS ) {
-    // It is possible that a different shield is present that supports the SD card, but for
-    // now we only look if the AdaFruit shield is present.
-    sdCardPresent = SD.begin( codecCardCs );
-  }
-#endif // featureCodec
-
-#if featureSynth
-  // If necessary, the pin of the SoftwareSerial object can be changed like this. For 
-  // now, we are defining it at compile time so this is unnecessary.
-  // Switch the MIDI serial port to pin 3 for the SparkFun Shield.
-  // VS1053_MIDI = SoftwareSerial( 0, synthPin );
-#endif // featureSynth
-
-#if featureServos
-  servos[0].servo.attach( servo0Pin );  // attaches the servo object to the appropriate pin.
-  servos[1].servo.attach( servo1Pin );
-  processServoReset();
-#endif // featureServos
-
-#if featureNeoPix
-  neoPixels[0].strip.setPin( neoPix0Pin );
-  neoPixels[1].strip.setPin( neoPix1Pin );
-  processNeoPixReset();
-#endif // featureNeoPix
-
-  showCapabilities();
-}
-
-// Recall that this function, loop, gets called continuously.
-void loop()
-{
-  processCmdQueue();
-
-#if featureCodec
-  if ( mp3CodecMode )
-    VS1053_CODEC.update();
-#endif // featureCodec
-
-  timer.run();
-}
-
 // A simple queue for commands received from the EV3.
 // cmdQueueWrite is the next index at which a byte will be written.
 // cmdQueueRead is the next index at which a byte will be read.
@@ -897,6 +811,9 @@ struct xferQueue {
   byte readIdx;
   bool overflowOccured;
   xferQueue() : writeIdx( 0 ), readIdx( 0 ), overflowOccured( false ) {}
+  inline void reset() {
+    writeIdx = readIdx = 0;
+  }
   inline bool empty() {
     return ( readIdx == writeIdx );
   }
@@ -937,8 +854,116 @@ struct xferQueue {
     return( data );
   }
 } cmdQueue; // , reqQueue;
-volatile bool cmdProcessing = false;
-//bool cmdWaiting = false;
+volatile bool cmdProcessing = true;
+#if DIAG_QUEUE
+int readRequests = 0;
+
+void processCmdQueueCheck()
+{
+  _print2( F("CmdQueue bytes ") ); _print2( cmdQueue.bytes() ); _print2( F(" available ") ); _print2( Wire.available() ); _print2( F(" reads " ) ); _print2( readRequests ); _print2( F(" status ") ); _println2( genStatusByte() );
+  readRequests = 0;
+}
+#endif // DIAG_QUEUE
+
+void showCapabilities()
+{
+  _println1( F("EV3 Arduino Extensions " VERSION " - " __DATE__ " " __TIME__) );
+
+#if featureCodec
+  _println2( F("Codec support for AdaFruit Music Maker Shield.") );
+  _println2( F("- supports .mp3 and .mid files.") );
+  if( usingAdaFruitMMS ) {
+    _println2( F("- detected AdaFruit Music Maker Shield") );
+    if ( sdCardPresent )
+      _println2( F("- detected SD card") );
+  }
+#endif // featureCodec
+
+#if featureSynth
+  _print2( F("MIDI synthesizer support on pin ") ); _println2( synthPin );
+  _println2( F("- supports AdaFruit Music Maker Shield OR SparkFun Music Instrument Shield") );
+#endif // featureSynth
+
+#if defined( vs1053Mode ) && defined( vs1053Reset )
+  _print2( F("Switching music modes requires RST on pin ") ); _print2( vs1053Reset ); _print2( F(" and GPIO1 to pin ") ); _println2( vs1053Mode );
+#endif // defined( vs1053Mode ) && defined( vs1053Reset )
+
+#if featureServos
+  _print2( F("Servo support for servos on pin ") ); _print2( servo0Pin ); _print2( F( " and pin ") ); _println2( servo1Pin );
+#endif // featureServos
+
+#if featureNeoPix
+  _print2( F("NeoPixel support for strips on pin ") ); _print2( neoPix0Pin ); _print2( F(" and pin ") ); _println2( neoPix1Pin );
+#endif // featureNeoPix
+}
+
+void setup()
+{
+#if VERBOSITY
+  Serial.begin(115200);
+#endif // VERBOSITY
+
+  Wire.begin( ardAdd );
+  Wire.onReceive( receiveData );
+  Wire.onRequest( requestData );
+#if DIAG_QUEUE
+  timer.setInterval( 10000, processCmdQueueCheck );
+#endif // DIAG_QUEUE
+
+#if defined( vs1053Mode ) && defined( vs1053Reset )
+  // These pins are used to control the VS1053 on the AdaFruit shield, so must be output.
+  pinMode( vs1053Mode, OUTPUT );
+  pinMode( vs1053Reset, OUTPUT );
+#endif
+
+#if featureCodec
+  // If we can enter CODEC mode, then we interpret that to mean that we are running with
+  // the AdaFruit Music Maker Shield.
+  usingAdaFruitMMS = VS1053_CODEC.enter();
+  VS1053_CODEC.exit();
+  if( usingAdaFruitMMS ) {
+    // It is possible that a different shield is present that supports the SD card, but for
+    // now we only look if the AdaFruit shield is present.
+    sdCardPresent = SD.begin( codecCardCs );
+  }
+#endif // featureCodec
+
+#if featureSynth
+  // If necessary, the pin of the SoftwareSerial object can be changed like this. For 
+  // now, we are defining it at compile time so this is unnecessary.
+  // Switch the MIDI serial port to pin 3 for the SparkFun Shield.
+  // VS1053_MIDI = SoftwareSerial( 0, synthPin );
+#endif // featureSynth
+
+#if featureServos
+  servos[0].servo.attach( servo0Pin );  // attaches the servo object to the appropriate pin.
+  servos[1].servo.attach( servo1Pin );
+  processServoReset();
+#endif // featureServos
+
+#if featureNeoPix
+  neoPixels[0].strip.setPin( neoPix0Pin );
+  neoPixels[1].strip.setPin( neoPix1Pin );
+  processNeoPixReset();
+#endif // featureNeoPix
+
+  showCapabilities();
+
+  cmdProcessing = false;
+}
+
+// Recall that this function, loop, gets called continuously.
+void loop()
+{
+  processCmdQueue();
+
+#if featureCodec
+  if ( mp3CodecMode )
+    VS1053_CODEC.update();
+#endif // featureCodec
+
+  timer.run();
+}
 
 // This routine is called (in the context of an interrupt) when data has been received
 // by the wire/I2C interface. The code suggests that it will be called when the end of a
@@ -952,12 +977,8 @@ void receiveData(int howMany)
   }
 }
 
-void requestData()
+byte genStatusByte() 
 {
-//  if( !reqQueue.empty() ) {
-//    Wire.write( reqQueue.pop_front() );
-//  }
-//  else {  
     byte data = 0x80;
     if( cmdProcessing || !cmdQueue.empty() )
       data |= 0x1;
@@ -977,7 +998,18 @@ void requestData()
     if( VS1053_CODEC.isPlaying() )
       data |= 0x40;
 #endif // featureCodec
-    Wire.write( data );
+  return data;
+}
+void requestData()
+{
+//  if( !reqQueue.empty() ) {
+//    Wire.write( reqQueue.pop_front() );
+//  }
+//  else {  
+    Wire.write( genStatusByte()  );
+#if DIAG_QUEUE
+    ++readRequests;
+#endif // DIAG_QUEUE
 //  }
 }
 
@@ -1018,7 +1050,6 @@ static const struct {
   { 125, 3, processTest },
   { 126, 5, processTest },
   { 127, 0, processReset },
-//  { 0, 0, processNop },
 };
 
 void processCmdQueue()
@@ -1060,10 +1091,6 @@ void processCmdQueue()
 #endif // featureSynth
 
     if( cmdQueue.bytes() >= 1 + dataBytes ) {
-//      if( cmdWaiting ) {
-//        Serial.println( F(" done") );
-//        cmdWaiting = false;
-//      }
       cmdProcessing = true;
       // Now that we know we have all the bytes, we can update our read pointer.
       cmdQueue.pop_front();
@@ -1073,7 +1100,7 @@ void processCmdQueue()
       for ( byte i = dataBytes; i < sizeof(data); ++i )
         data[i] = 0;
 
-      _print2( F("Processing cmd ") ); _println2( cmd );
+      // _print2( F("Processing cmd ") ); _println2( cmd );
       // now that we have the data bytes collected, invoke the processing function.
       (*cmdFunc)( cmd, data );
   
@@ -1084,17 +1111,12 @@ void processCmdQueue()
       // At the moment, I cannot send six bytes at once from the EV3. So I tollerate getting them
       // as 2+4.
       if( (cmdQueue.bytes() == 2 || cmdQueue.bytes() == 4) && dataBytes >= 3 ) {
-//        if( !cmdWaiting ) {
-//          Serial.print( F("waiting for data, cmd ") ); Serial.print( cmdQueue.peek_front() ); 
-//          cmdWaiting = true;
-//        }
         break;
       }
       // data byte has not arrived yet. Process it next time. Why don't we wait 'forever' for it to 
       // arrive? Because sometimes we get garbage over the wire, and if it looks like a command then
       // it gets stuck. This way, if the rest of the command does not show up fairly quickly, then
       // we discard it.
-      _println3( cmdQueue.bytes() );
       static byte s_tries = 0;
       ++s_tries;
       if ( s_tries > 3 )
