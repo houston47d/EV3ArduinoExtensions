@@ -1,6 +1,6 @@
 //  "EV3ArduinoExtensions"
 
-#define VERSION "1.4"
+#define VERSION "1.5"
 
 // Set one of the following to '1' to select which configuration to build for. These each
 // represent one of the configurations that we are currently using. More can certainly be added
@@ -10,20 +10,18 @@
 //
 // Arduino Uno with the AdaFruit Music Maker Shield
 #define UnoWithAdafruitMms 0
-// Arduino Uno with the SparkFun Musical Instrument Shield
-#define UnoWithSparkFunMis 0
 // Pro Micro with the AdaFruit Music Maker Breakout board
-#define ProMicroWithAdaFruitMmb 1
+#define Ev3ExtensionsV1 0
 // Pro Micro alone
-#define ProMicro 0
+#define Ev3ExtensionsV2 1
 
 #if UnoWithAdafruitMms
+#define Configuration "EV3ExtUnoMms"
 #define ardAdd 0x04 //I2C address of Arduino when talking to the EV3
 // These pins must be defined if both Codec and Synth modes are supported to allow
 // the VS1053 to be 'booted' into the respective mode. If only one mode is to be 
 // supported, then the GPIO1 pin of the VS1053 should just be tied to the appropriate
 // level to have it come up in that mode.
-#define vs1053Reset 9      // VS1053 reset pin
 #define vs1053Mode 12     // VS1053 mode bit (output)
 #define featureCodec 1
 // The codec and synthesizer pins are determined by the shield.
@@ -33,29 +31,18 @@
 #define codecDReq 3    // VS1053 Data request, ideally an Interrupt pin
 #define featureSynth 1
 #define synthPin 2
-#define featureServos 0
-#define servo0Pin 8
-#define servo1Pin 10
-#define featureNeoPix 0
-#define neoPix0Pin 6
-#define neoPix1Pin 8
-
-#elif UnoWithSparkFunMis
-#define ardAdd 0x04 //I2C address of Arduino when talking to the EV3
-#define featureSynth 1
-#define synthPin 3
 #define featureServos 1
-#define servo0Pin 8
+#define servo0Pin 9
 #define servo1Pin 10
 #define featureNeoPix 1
-#define neoPix0Pin 6
-#define neoPix1Pin 8
+#define neoPix0Pin 5
+#define neoPix1Pin 6
 
-#elif ProMicroWithAdaFruitMmb
-// The main purpose of the Pro Micro with the AdaFruit Music Maker Breakout board is to
-// play MP3 and MID files from the SD card. The MP3 playback requires lots of attention 
-// from the CPU, but it can deal with simple tasks like running servos. The MID playback
-// is much lower data rate.
+#elif Ev3ExtensionsV1
+// The EV3 Extension V1 board contains a SparkFun ProMicro, an Adafruit VS1053 breakout
+// board with SD card (with the hard reset, GPI0 1, SPI, and serial connection), and 
+// 4- 3-pin connectors for two servos and two NeoPixel strips.
+#define Configuration "EV3ExtV1"
 #define ardAdd 0x04 //I2C address of Arduino when talking to the EV3
 #define vs1053Reset 4      // VS1053 reset pin
 #define vs1053Mode 20     // VS1053 mode bit (output)
@@ -74,20 +61,29 @@
 #define neoPix0Pin 6
 #define neoPix1Pin 10
 
-#elif ProMicro
-// The main purpose of the Pro Micro alone is to run the two NeoPixel strips as these
-// can be rather time intensive (and thus incompatible with streaming music from the
-// SD card). But running the synthesizer (note by note) and the servos are both low
-// overhead activities and we allow them to be connected as well.
-#define ardAdd 0x05 //I2C address of Arduino when talking to the EV3
+#elif Ev3ExtensionsV2
+// The EV3 Extension V2 board differs from the V1 as follows:
+//  - S0 and S1 are now on pins 9 and 10 (both connected to timer 1, allowing
+//    the use of the alternate PWM servo library).
+//  - NP0 and NP1 are now on pins 5 and 6 (primarily to free up pin 10 for above).
+//  - the VS1053 reset and serial pins are no longer connected (since the software
+//    uses soft reset to change modes, and SPI to talk MIDI (as well as Codec). 
+#define Configuration "EV3ExtV2"
+#define ardAdd 0x04 //I2C address of Arduino when talking to the EV3
+#define vs1053Mode 20     // VS1053 mode bit (output)
+#define featureCodec 1
+#define codecCs 18      // VS1053 command chip select pin (output)
+#define codecDCs 19     // VS1053 data chip select pin (output)
+#define codecCardCs 21  // SD Card chip select pin
+#define codecDReq 7     // VS1053 Data request, ideally an Interrupt pin
 #define featureSynth 1
-#define synthPin 5
-#define featureNeoPix 1
-#define neoPix0Pin 6
-#define neoPix1Pin 7
+#define allMidiHave2Bytes 1
 #define featureServos 1
-#define servo0Pin 8
+#define servo0Pin 10
 #define servo1Pin 9
+#define featureNeoPix 1
+#define neoPix0Pin 5
+#define neoPix1Pin 6
 
 #else
 # error "No platform configuration defined"
@@ -429,7 +425,7 @@ struct servoData {
   } segments[8];
   uint16_t minPulseWidth;
   uint16_t maxPulseWidth;
-  // The current position, in usec (actual is MIN_PULSE_WIDTH + currentPosition).
+  // The current position, in usec (actual is minPulseWidth + currentPosition).
   int16_t currentPosition;
   // The step on each interval, in fractional usec.
   int16_t stepsPerInterval;
@@ -442,10 +438,10 @@ struct servoData {
   byte numSegments;
   // The number of times remaining to repeat segments, or 0xff if forever.
   byte cyclesRemaining;
-  // If true, then travelTime is actually 0..100% of max speed (.25 s/60 deg).
-  bool specifyDelta;
-  bool specifySpeed;
-  
+
+  void attach( int8_t pin ) {
+    servo.attach( pin, minPulseWidth, maxPulseWidth );
+  }
   void set( int8_t position ) {
     // currentPosition = ((int16_t) (maxPulseWidth - minPulseWidth) * position / 180) << FRAC_BITS;
     position = constrain( position, -90, 90 );
@@ -465,10 +461,6 @@ struct servoData {
     intervalsRemaining = 0;
     cyclesRemaining = 0;
   }
-  void setMode( bool byDelta, bool bySpeed ) {
-    specifyDelta = byDelta;
-    specifySpeed = bySpeed;
-  }
   void addSegment( int8_t position, byte interval ) {
     if( numSegments >= sizeof(segments) / sizeof(segments[0]) ) {
       _println1( F("Error: exceeded max servo segments") );
@@ -484,26 +476,19 @@ struct servoData {
   {
     int16_t newPosition = map( segments[currentSegment].endPosition, -90, 90, 0, (maxPulseWidth - minPulseWidth) ) << FRAC_BITS;
     int16_t steps = newPosition - currentPosition;
-    if( specifySpeed ) {
-      // We define 100 to be 60 degrees in 256 mSec. Since the range of pulse widths represents 180 degrees,
-      // then 1/3 of the range is the equivelent number of usecs.
-      stepsPerInterval = (int16_t) (((maxPulseWidth - minPulseWidth) / 3) << FRAC_BITS) / (256 / SERVO_INTERVAL);
-      // At the time of this writing, stepsPerInterval comes out to be 960. If we just do 960 * N / 100,
-      // it overflows because 96000 (the maximum) does't fit in a 16-bit signed number. But since we know
-      // that it is a constant ending in a zero, we can divide it down once before the multiply, still fit
-      // within 16 bits, and 
-      stepsPerInterval = ((stepsPerInterval / 10) * segments[currentSegment].travelTime) / 10;
-      if( steps < 0 )
-        stepsPerInterval = -stepsPerInterval;
-      intervalsRemaining = steps / stepsPerInterval;
-      if( intervalsRemaining <= 0 )
-        intervalsRemaining = 1;
-    }
-    else {
-      int16_t intervals = segments[currentSegment].travelTime * (SERVO_TIME_INTERVAL / SERVO_INTERVAL);
-      stepsPerInterval = (steps >= 0 ? steps + (intervals >> 1) : steps - (intervals >> 1)) / intervals; 
-      intervalsRemaining = intervals;
-    }
+    // We define 100 to be 60 degrees in 256 mSec. Since the range of pulse widths represents 180 degrees,
+    // then 1/3 of the range is the equivelent number of usecs.
+    stepsPerInterval = (int16_t) (((maxPulseWidth - minPulseWidth) / 3) << FRAC_BITS) / (256 / SERVO_INTERVAL);
+    // At the time of this writing, stepsPerInterval comes out to be 960. If we just do 960 * N / 100,
+    // it overflows because 96000 (the maximum) does't fit in a 16-bit signed number. But since we know
+    // that it is a constant ending in a zero, we can divide it down once before the multiply, still fit
+    // within 16 bits, and 
+    stepsPerInterval = ((stepsPerInterval / 10) * segments[currentSegment].travelTime) / 10;
+    if( steps < 0 )
+      stepsPerInterval = -stepsPerInterval;
+    intervalsRemaining = steps / stepsPerInterval;
+    if( intervalsRemaining <= 0 )
+      intervalsRemaining = 1;
     _print3( F("setup segment ") ); _print3( currentSegment ); _print3( F(" steps ") ); _print3( stepsPerInterval ); _print3( F(" intervals ") ); _println3( intervalsRemaining );
   }
   void interval()
@@ -533,7 +518,7 @@ struct servoData {
       servo.write( pulseWidth );
     }
   }
-  servoData() : minPulseWidth( MIN_PULSE_WIDTH ), maxPulseWidth( MAX_PULSE_WIDTH ) {}
+  servoData() : minPulseWidth( MIN_PULSE_WIDTH + 130 ), maxPulseWidth( MAX_PULSE_WIDTH - 130 ) {}
 } servos[2];
 
 void processServos()
@@ -543,30 +528,12 @@ void processServos()
     servo.interval();
   }
 }
-void processServoMoveTime( byte cmd, const byte* data )
-{
-  struct servoData& servo( servos[data[0] & 0x1] );
-  servo.stop();
-  if( data[2] > 0 ) {
-    // data[1] is position in degrees 0..180 (for now). Our servo class works in 
-    // degrees from -90..90.
-    servo.setMode( false, false );
-    int8_t position = (int8_t) (data[1] - 90);
-    servo.addSegment( position, data[2] );
-    servo.cyclesRemaining = 1;
-    servo.setupSegment();
-  }
-  else {
-    servo.set( data[1] );
-  }
-}
-void processServoMoveSpeed( byte cmd, const byte* data )
+void processServoMove( byte cmd, const byte* data )
 {
   struct servoData& servo( servos[cmd - 10] );
   servo.stop();
   // data[1] is speed, in percent of maximum from 0..100.
   if( data[1] > 0 ) { // zero speed is nonsensical.
-    servo.setMode( false, true );
     // data[0] is position in degrees -90..90 with an offset of 128 so it 
     // works in an unsigned 8-bit value. Our servo class works in degrees
     // from -90..90. 
@@ -576,35 +543,14 @@ void processServoMoveSpeed( byte cmd, const byte* data )
     servo.setupSegment();
   }
 }
-void processServoMoveDeltaSpeed( byte cmd, const byte* data )
-{
-  struct servoData& servo( servos[cmd - 8] );
-  servo.stop();
-  // data[1] is speed, in percent of maximum from 0..100.
-  if( data[1] > 0 ) { // zero speed is nonsensical.
-    servo.setMode( false, true );
-    // data[0] is degrees to move -128..127 with an offset of 128 so it 
-    // works in an unsigned 8-bit value.
-    int8_t delta = (data[0] - 128);
-    // This is only a partial solution to the 'delta' problem. A real solution
-    // will involve storing the delta in the segments. But since all we are 
-    // supporting at the moment is a simple (single) move, this works.
-    int16_t position = servo.get();
-    position += delta;
-    position = constrain( position, -90, 90 );
-    servo.addSegment( (int8_t) position, data[1] );
-    servo.cyclesRemaining = 1;
-    servo.setupSegment();
-  }
-}
 void processServoSegment( byte cmd, const byte* data )
 {
   struct servoData& servo( servos[data[0] & 0x1] );
   if( cmd == 14 ) {
     servo.stop();
-    servo.setMode( false, false );
   }
-  servo.addSegment( (int8_t) (data[1] - 90), data[2] > 0 ? data[2] : 1 );
+  int8_t position = (data[1] - 128);
+  servo.addSegment( position, data[2] > 0 ? data[2] : 1 );
 }
 void processServoExecute( byte cmd, const byte* data )
 {
@@ -861,7 +807,7 @@ void setVS1053Mode( bool midiSynth )
   VS1053_CODEC.softReset();
   // VS1053_CODEC.testVS1053Gpio();
 #elif defined( vs1053Reset )
-  //Reset the VS1053. Not really useful at this point.
+  // If the VS1053 is connected to a pin, then we can reset it the old fashioned way.
   digitalWrite( vs1053Reset, LOW );
   digitalWrite( vs1053Mode, (midiSynth ? HIGH : LOW) ); // high brings it up in MIDI mode
   delay(100);
@@ -1063,7 +1009,7 @@ void processCmdQueueCheck()
 
 void showCapabilities()
 {
-  _println1( F("EV3 Arduino Extensions " VERSION " - " __DATE__ " " __TIME__) );
+  _println1( F("EV3 Arduino Extensions (" Configuration ") " VERSION " - " __DATE__ " " __TIME__) );
 #if DIAG_STANDALONE
   _println1( F("Standalone Mode") );
 #endif // DIAG_STANDALONE
@@ -1131,7 +1077,8 @@ void setup()
   pinMode( vs1053Mode, OUTPUT );
 #endif
 #if defined( vs1053Reset )
-  // If we have a reset line to the VS1053, then give it a nice reset.
+  // If the VS1053 RST is connected to a pin, then we have to make sure that it is an output and
+  // set high to let it out of reset (the breakout board has a pull-down resistor on it).
   digitalWrite( vs1053Reset, LOW );
   pinMode( vs1053Reset, OUTPUT );
   delay( 100 );
@@ -1159,8 +1106,8 @@ void setup()
 #endif // featureSynth
 
 #if featureServos
-  servos[0].servo.attach( servo0Pin, MIN_PULSE_WIDTH + 130, MAX_PULSE_WIDTH - 130 );  // attaches the servo object to the appropriate pin.
-  servos[1].servo.attach( servo1Pin, MIN_PULSE_WIDTH + 130, MAX_PULSE_WIDTH - 130 );
+  servos[0].attach( servo0Pin );  // attaches the servo object to the appropriate pin.
+  servos[1].attach( servo1Pin );
   processServoReset();
   timer.setInterval( SERVO_INTERVAL, processServos );
 #endif // featureServos
@@ -1252,14 +1199,11 @@ static const struct {
   { 5, 1, processCodecStop },
 #endif // featureCodec
 #if featureServos
-  { 8, 2, processServoMoveDeltaSpeed }, // servo is low bit of command.
-  { 9, 2, processServoMoveDeltaSpeed }, // servo is low bit of command.
-  { 10, 2, processServoMoveSpeed }, // servo is low bit of command.
-  { 11, 2, processServoMoveSpeed }, // servo is low bit of command.
-  { 13, 3, processServoMoveTime },
-  { 14, 3, processServoSegment },
-  { 15, 3, processServoSegment },
-  { 16, 3, processServoExecute },
+  { 10, 2, processServoMove }, // servo is low bit of command.
+  { 11, 2, processServoMove }, // servo is low bit of command.
+  { 14, 3, processServoSegment }, // start path
+  { 15, 3, processServoSegment }, // path segment
+  { 16, 3, processServoExecute }, // execute path
 #endif // featureServos
 #if featureNeoPix
   { 20, 3, processNeoPixConfig },
@@ -1384,13 +1328,12 @@ static const struct {
   { 0,     3, { 31, 0, 1, 32, 0 } },    // Walk Leds
 #endif // featureNeoPix
 #if featureServos
-  { 100,   3, { 14, 0, 160, 20, 0 } },   // Servo start path
-  { 0,     3, { 15, 0, 160, 10, 0 } },   // Servo add segment
-  { 0,     3, { 15, 0,  90, 40, 0 } },   // Servo add segment
-  { 0,     3, { 15, 0,  20, 20, 0 } },   // Servo add segment
-  { 0,     3, { 15, 0,  20, 10, 0 } },   // Servo add segment
-  { 0,     3, { 15, 0,  90, 40, 0 } },   // Servo add segment
+  { 100,   3, { 14, 0,  70 + 128, 50, 0 } },   // Servo start path
+  { 0,     3, { 15, 0,   0 + 128, 25, 0 } },   // Servo add segment
+  { 0,     3, { 15, 0, -70 + 128, 50, 0 } },   // Servo add segment
+  { 0,     3, { 15, 0,   0 + 128, 25, 0 } },   // Servo add segment
   { 0,     3, { 16, 0, 127, 0 } },       // Servo execute path
+  { 0,     2, { 11, -90 + 128, 100, 0 } },  // Servo 1 to negative extreme
 #endif // featureServos
 #if featureCodec
   { 100,   1, { 1, 2, 0 } },            // Track mode
@@ -1403,6 +1346,7 @@ static const struct {
   { 20000, 1, { 5, 0, 0 } },            // Stop track
 #if featureServos
   { 0,     3, { 16, 0, 0, 0 } },        // Servo stop path
+  { 0,     2, { 11, 90 + 128, 100, 0 } },  // Servo 1 to positive extreme
 #endif // featureServos
   { 100,   1, { 2, 2, 0 } },            // Play track 2
 #if featureNeoPix
@@ -1412,8 +1356,8 @@ static const struct {
 #endif // featureNeoPix
   { 20000, 1, { 5, 0, 0 } },
 #if featureServos
-  // { 100,   3, { 13, 0, 45, 0, 0 } },   // Servo move
   { 100,   2, { 10, -45 + 128, 100, 0 } },   // Servo move
+  { 0,     2, { 11, 45 + 128, 50, 0 } },  // Servo 1 move
 #endif // featureServos
   { 100,   1, { 2, 3, 0 } },            // Play track 3
 #if featureNeoPix
@@ -1423,9 +1367,8 @@ static const struct {
 #endif // featureNeoPix
   { 20000, 1, { 5, 0, 0 } },
 #if featureServos
-  // { 100,   3, { 13, 0, 135, 0, 0 } },    // Servo move
-  // { 100,   2, { 10, 45 + 128, 50, 0 } },    // Servo move
-  { 100,   2, { 8, 90 + 128, 50, 0 } },    // Servo move
+  { 100,   2, { 10, 45 + 128, 50, 0 } },    // Servo move
+  { 0,     2, { 11, 0 + 128, 25, 0 } },    // Servo 1 move
 #endif // featureServos
   { 100,   1, { 2, 4, 0 } },            // Play track 4
 #if featureNeoPix
@@ -1442,9 +1385,7 @@ static const struct {
   { 0,     5, { 26, 1, 0, 127, 10, 10 } }, // Leds 1 to red
 #endif // featureNeoPix
 #if featureServos
-  // { 100,   3, { 13, 0, 90, 0, 0 } },    // Servo move
-  // { 100,   2, { 10, 0 + 128, 25, 0 } },    // Servo move
-  { 100,   2, { 8, -45 + 128, 25, 0 } },    // Servo move
+  { 100,   2, { 10, 0 + 128, 25, 0 } },    // Servo move
 #endif // featureServos
 #if featureSynth
   { 100,   1, { 1, 1, 0 } },            // Note mode
