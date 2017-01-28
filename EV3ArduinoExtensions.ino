@@ -1,6 +1,6 @@
 //  "EV3ArduinoExtensions"
 
-#define VERSION "1.2"
+#define VERSION "1.3"
 
 // Set one of the following to '1' to select which configuration to build for. These each
 // represent one of the configurations that we are currently using. More can certainly be added
@@ -66,6 +66,7 @@
 #define codecDReq 7    // VS1053 Data request, ideally an Interrupt pin
 #define featureSynth 1
 #define synthPin 5
+#define allMidiHave2Bytes 1
 #define featureServos 0 // was 1
 #define servo0Pin 8
 #define servo1Pin 9
@@ -123,6 +124,7 @@
 #endif
 
 #define DIAG_QUEUE 0
+#define DIAG_STANDALONE 0
 
 // Memory saving steps.
 // In addition to the above VERBOSITY setting, I had to modify the SD library to allow it to compile
@@ -130,7 +132,9 @@
 // linked in because the functions are called by other functions that handle both read and write.
 
 #include <SPI.h>
+#if !DIAG_STANDALONE
 #include <Wire.h>
+#endif // !DIAG_STANDALONE
 #if featureSynth
 #include <SoftwareSerial.h>
 #endif // featureSynth
@@ -139,7 +143,7 @@
 #include <SD.h>
 #endif // featureCodec
 #if featureServos
-// #include <Servo.h>
+#include <Adafruit_TiCoServo.h> 
 #endif // featureServos
 #if featureNeoPix
 #include <Adafruit_NeoPixel.h>
@@ -323,7 +327,6 @@ void talkMIDI( byte cmd, byte data1, byte data2 )
 void processMIDI( byte cmd, const byte* data )
 {
   if( midiSynthMode ) {
-    _print3( F("midi ") ); _print3( cmd ); _print3( F(" bytes ") ); _print3( data[0] ); _print3( F(" ") ); _println3( data[1] );
     talkMIDI( cmd, data[0], data[1] );
   }
   else 
@@ -334,9 +337,8 @@ void processMIDI( byte cmd, const byte* data )
 #if featureServos
 // This section contains global variables to maintain the state of the two servos.
 // These three defines control the range and the speed of both of the servos.
-#define SERVO_MIN 0
+#define SERVO_MIN -90
 #define SERVO_MAX 90
-#define SERVO_STEP 1
 
 // left_servo is the  servo object that controls the left servo/legs.
 // left_move is a flag that stores the current 'moving' state of the left servo/legs.
@@ -346,101 +348,116 @@ void processMIDI( byte cmd, const byte* data )
 // left_step holds how much the position is changed with each iteration. The sign of
 // the number indicates the direction. Currently either 1 or -1. It is changed when
 // the position reaches the desired limits of 0 and 90 degrees.
+#define FRAC_BITS 7
+#define HALF_FRAC ((1 << (FRAC_BITS-1))-1)
 struct servoData {
-  Servo servo;
-  volatile boolean move;
-  int pos;
-  int step;
+  Adafruit_TiCoServo servo;
+  struct legData {
+      byte endPosition;
+      byte travelTime;
+  } legs[8];
+  // The current position, in fractional degrees.
+  int16_t currentPosition;
+  // The step on each interval, in fractional degrees.
+  int16_t stepsPerInterval;
+  // The number of intervals until the current leg is completed.
+  byte intervalsRemaining;
+  // The current leg index into legs.
+  byte currentLeg;
+  // The number of valid entries in legs.
+  byte numLegs;
+  // The number of times remaining to repeat legs, or 0xff if forever.
+  byte cyclesRemaining;
+
+  void set( byte position ) {
+    currentPosition = (int16_t)position << FRAC_BITS;
+    servo.write( (currentPosition + HALF_FRAC) >> FRAC_BITS );
+  }
+  void stop()
+  {
+    currentLeg = 0;
+    numLegs = 0;
+    intervalsRemaining = 0;
+    cyclesRemaining = 0;
+  }
+  void addLeg( byte position, byte interval ) {
+    if( numLegs >= sizeof(legs) / sizeof(legs[0]) ) {
+      _println1( F("Error: exceeded max servo legs") );
+      return;
+    }
+    legs[numLegs].endPosition = position;
+    legs[numLegs].travelTime = interval; // in 128 mSec intervals.
+    _print2( F("leg ") ); _print2( numLegs ); _print2( F(" end ") ); _print2( legs[numLegs].endPosition ); _print2( F(" time ") ); _println2( legs[numLegs].travelTime );
+    ++numLegs;
+  }
+  void setupLeg()
+  {
+    int16_t steps = ((int16_t)legs[currentLeg].endPosition << FRAC_BITS) - currentPosition;
+    byte intervals = legs[currentLeg].travelTime;
+    stepsPerInterval = (steps >= 0 ? steps + (intervals >> 1) : steps - (intervals >> 1)) / intervals; 
+    intervalsRemaining = legs[currentLeg].travelTime;
+    _print2( F("leg ") ); _print2( currentLeg ); _print2( F(" steps ") ); _print2( stepsPerInterval ); _print2( F(" intervals ") ); _println2( intervalsRemaining );
+  }
+  void interval()
+  {
+    // Is the servo actually running...
+    if( intervalsRemaining > 0 ) {
+      --intervalsRemaining;
+      // Have we reached the end of the current leg?
+      if( intervalsRemaining == 0 ) {
+        // Then use the exact end position specified (in case of accumulated error).
+        currentPosition = (int16_t)legs[currentLeg].endPosition << FRAC_BITS;
+        // Have we reached the end of the specified legs?
+        ++currentLeg;
+        if( currentLeg >= numLegs ) {
+          currentLeg = 0;
+          if( cyclesRemaining != 0xff )
+            --cyclesRemaining;
+        }
+        if( cyclesRemaining != 0 )
+          setupLeg();
+      }
+      else {
+        currentPosition += stepsPerInterval;
+      }
+      _println2(currentPosition);
+      servo.write( (currentPosition + HALF_FRAC) >> FRAC_BITS );
+    }
+  }
 } servos[2];
-int servoDelay = 15;
-int servoTimerId = -1;
+int servoDelay = 128;
 
 void processServos()
 {
   for( byte i = 0; i < 2; ++i ) {
     struct servoData& servo( servos[i] );
-    if( servo.move ) {
-      // If we are moving the servo/legs, then advance its current position
-      // by the specified step...
-      servo.pos += servo.step;
-      // ...then change the direction of the step if the position has exceeded
-      // the desired range.
-      if( servo.pos >= SERVO_MAX ) {
-        servo.step = -SERVO_STEP;
-      }
-      else if( servo.pos <= SERVO_MIN ) {
-        servo.step = SERVO_STEP;
-      }
-      // tell servo to go to the newly calculated position in variable 'left_pos'
-      servo.servo.write( servo.pos );
-    }
+    servo.interval();
   }
 }
-
-void updateServoTimer()
+void processServoSegment( byte cmd, const byte* data )
 {
-  if( servoTimerId != -1 ) {
-    timer.deleteTimer( servoTimerId );
-    servoTimerId = -1;
-  }
-  if( servos[0].move || servos[1].move ) {
-    servoTimerId = timer.setInterval( servoDelay, processServos );
+  struct servoData& servo( servos[data[0] & 0x1] );
+  if( cmd == 10 )
+    servo.stop();
+  servo.addLeg( data[1], data[2] );
+  if( cmd == 12 ) {
+    servo.cyclesRemaining = 1;
+    servo.setupLeg();
   }
 }
-void processServoMove( byte cmd, const byte* data )
+void processServoStop( byte cmd, const byte* data )
 {
-  // Command 10 is the SERVO/Legs command. Data is interpreted as a bit field where
-  // the least significant bit (0) sets the left side state, and next least significant
-  // bit (1) sets the right side state. So every time you send a command, the state of both
-  // sides is set. So the following values are valid:
-  //  0 - turns off both sides.
-  //  1 - turns the left side on and the right side off.
-  //  2 - turns the left side off and the right side on.
-  //  3 - turns on both sides.
-  // Of course, you can define other protocols as well (and it won't hurt my feelings).
-  for( byte i = 0; i < 2; ++i ) {
-    struct servoData& servo( servos[i] );
-    servos[i].move = ( (data[0] & (1 << i)) != 0 );
-    if( !servos[i].move ) {
-      servo.pos = (SERVO_MAX + SERVO_MIN) / 2;
-      servo.servo.write( servo.pos );
-    }
-  } 
-  updateServoTimer();
-}
-void processServoSpeed( byte cmd, const byte* data )
-{
-  // Command 11 is the SERVO speed command. The Data is interpreted as a speed where
-  // zero (0) is the slowest (increments the servo counts once every 130 mSec) and
-  // 127 is the fastest (increments the servo counts once every 2 mSec).
-  servoDelay = (128 - data[0]);
-  if ( servoDelay < 2 ) servoDelay = 2;
-  else if ( servoDelay > 200 ) servoDelay = 200;
-  updateServoTimer();
-}
-void processServoDirection( byte cmd, const byte* data )
-{
-  // Command 12 is the SERVO direction command. Data is interpreted as a bit field where
-  // the least significant bit (0) set the direction for the left side, and the next least
-  // significant bit (1) sets the direction for the right side. If the bit is zero, the servo
-  // starts in the 'positive' direction, and if 1 in the negative direction. Of course, once
-  // the servo reaches the end of its range, it reverses direction.
-  for( byte i = 0; i < 2; ++i ) {
-    struct servoData& servo( servos[i] );
-    servos[i].step = ( (data[0] & (1 << i)) != 0 ? -SERVO_STEP : SERVO_STEP );
-  }
+  struct servoData& servo( servos[data[0] & 0x1] );
+  servo.stop();
 }
 void processServoReset()
 {
   for( byte i = 0; i < 2; ++i ) {
     struct servoData& servo( servos[i] );
-    servo.move = false;
-    servo.pos = (SERVO_MAX + SERVO_MIN) / 2;
-    servo.step = (i == 0 ? SERVO_STEP : -SERVO_STEP);
-    servo.servo.write( servo.pos );
+    servo.stop();
+    servo.currentPosition = (int16_t)90 << FRAC_BITS;
+    servo.servo.write( (servo.currentPosition + HALF_FRAC) >> FRAC_BITS );
   }
-  servoDelay = 15;
-  updateServoTimer();
 }
 #endif // featureServos
 
@@ -595,21 +612,23 @@ void processNeoPixWalkPixels( byte cmd, const byte* data )
   byte strip = (data[0] & 0x1);
   uint16_t frame = (data[0] >> 1);
   neoPixelData& npdata( neoPixels[strip] );
-  if( npdata.timerId >= 0 ) {
-    timer.deleteTimer( npdata.timerId );
-    npdata.timerId = -1;
-  }
-  npdata.walkStep = data[1];
-  long interval = (long) data[2] << 4;
-  if( npdata.walkStep > 0 && interval > 0 ) {
-    _print3( F("Starting NeoPixel walk pixels strip ") ); _print3(strip); 
-        _print3( F(" step ") ); _print3(npdata.walkStep); _print3( F(" interval ") ); _println3(interval);
-    npdata.walkMode = walkPixels;
-    npdata.timerId = timer.setInterval( interval, (strip ? processNeoPixWalkPixels1 : processNeoPixWalkPixels0) );
-  }
-  else {
-    npdata.walkMode = walkNone;
-    _print3( F("Stopping NeoPixel walk pixels strip ") ); _println3(strip);
+  if( npdata.strip.numPixels() ) {
+    if( npdata.timerId >= 0 ) {
+      timer.deleteTimer( npdata.timerId );
+      npdata.timerId = -1;
+    }
+    npdata.walkStep = data[1];
+    long interval = (long) data[2] << 4;
+    if( npdata.walkStep > 0 && interval > 0 ) {
+      _print3( F("Starting NeoPixel walk pixels strip ") ); _print3(strip); 
+          _print3( F(" step ") ); _print3(npdata.walkStep); _print3( F(" interval ") ); _println3(interval);
+      npdata.walkMode = walkPixels;
+      npdata.timerId = timer.setInterval( interval, (strip ? processNeoPixWalkPixels1 : processNeoPixWalkPixels0) );
+    }
+    else {
+      npdata.walkMode = walkNone;
+      _print3( F("Stopping NeoPixel walk pixels strip ") ); _println3(strip);
+    }
   }
 }
 void processNeoPixWalkFrames( byte cmd, const byte* data )
@@ -617,33 +636,35 @@ void processNeoPixWalkFrames( byte cmd, const byte* data )
   byte strip = (data[0] & 0x1);
   // uint16_t frame = (data[0] >> 1);
   neoPixelData& npdata( neoPixels[strip] );
-  if( npdata.timerId >= 0 ) {
-    timer.deleteTimer( npdata.timerId );
-    npdata.timerId = -1;
-    npdata.walkMode = walkNone;
-  }
-  long interval = (long) data[2] << 4;
-  if( interval > 0 ) {
-    int count = (data[1] & 0x7f);
-    _print3( F("Starting NeoPixel walk frames strip ") ); _print3(strip); 
-        _print3( F(" count ") ); _print3(count); _print3( F(" interval ") ); _println3(interval);
-    npdata.walkMode = (data[1] & 0x80 ? walkFramesBounce : walkFramesRoll);
-    // setup the initial conditions so that it immediately rolls or bounces with the first timer interval.
-    if( npdata.walkMode == walkFramesBounce ) {
-      npdata.walkFrame = 1;
-      npdata.walkStep = -1;
+  if( npdata.strip.numPixels() ) {
+    if( npdata.timerId >= 0 ) {
+      timer.deleteTimer( npdata.timerId );
+      npdata.timerId = -1;
+      npdata.walkMode = walkNone;
+    }
+    long interval = (long) data[2] << 4;
+    if( interval > 0 ) {
+      int count = (data[1] & 0x7f);
+      _print3( F("Starting NeoPixel walk frames strip ") ); _print3(strip); 
+          _print3( F(" count ") ); _print3(count); _print3( F(" interval ") ); _println3(interval);
+      npdata.walkMode = (data[1] & 0x40 ? walkFramesBounce : walkFramesRoll);
+      // setup the initial conditions so that it immediately rolls or bounces with the first timer interval.
+      if( npdata.walkMode == walkFramesBounce ) {
+        npdata.walkFrame = 1;
+        npdata.walkStep = -1;
+      }
+      else {
+        npdata.walkFrame = npdata.strip.numFrames() - 1;
+        npdata.walkStep = 1;
+      }
+      if( count == 0 )
+        npdata.timerId = timer.setInterval( interval, (strip ? processNeoPixTimerWalkFrames1 : processNeoPixTimerWalkFrames0) );
+      else
+        npdata.timerId = timer.setTimer( interval, (strip ? processNeoPixTimerWalkFrames1 : processNeoPixTimerWalkFrames0), count );
     }
     else {
-      npdata.walkFrame = npdata.strip.numFrames() - 1;
-      npdata.walkStep = 1;
+      _print3( F("Stopping NeoPixel walk frames strip ") ); _println3(strip);
     }
-    if( count == 0 )
-      npdata.timerId = timer.setInterval( interval, (strip ? processNeoPixTimerWalkFrames1 : processNeoPixTimerWalkFrames0) );
-    else
-      npdata.timerId = timer.setTimer( interval, (strip ? processNeoPixTimerWalkFrames1 : processNeoPixTimerWalkFrames0), count );
-  }
-  else {
-    _print3( F("Stopping NeoPixel walk frames strip ") ); _println3(strip);
   }
 }
 void processNeoPixReset()
@@ -753,7 +774,7 @@ void processMusicVolume( byte cmd, const byte* data )
 #endif // featureSynth
 #if featureCodec
   if( mp3CodecMode ) {
-    VS1053_CODEC.setVolume( volume );
+    VS1053_CODEC.setVolume( 127 - volume );
   }
 #endif // featureCodec
 }
@@ -806,7 +827,7 @@ void processUnrecognized( byte cmd, const byte* data )
 // So cmdQueueRead == cmdQueueWrite means the queue is empty.
 // and cmdQueueRead == (cmdQueueWrite + 1) % sizeof(cmdQueue) means the queue is full.
 struct xferQueue {
-  byte queue[16];
+  byte queue[32];
   byte writeIdx;
   byte readIdx;
   bool overflowOccured;
@@ -868,6 +889,9 @@ void processCmdQueueCheck()
 void showCapabilities()
 {
   _println1( F("EV3 Arduino Extensions " VERSION " - " __DATE__ " " __TIME__) );
+#if DIAG_STANDALONE
+  _println1( F("Standalone Mode") );
+#endif // DIAG_STANDALONE
 
 #if featureCodec
   _println2( F("Codec support for AdaFruit Music Maker Shield.") );
@@ -903,9 +927,13 @@ void setup()
   Serial.begin(115200);
 #endif // VERBOSITY
 
+#if !DIAG_STANDALONE
   Wire.begin( ardAdd );
   Wire.onReceive( receiveData );
   Wire.onRequest( requestData );
+#else
+  timer.setTimeout( 1000, processTestScript );
+#endif
 #if DIAG_QUEUE
   timer.setInterval( 10000, processCmdQueueCheck );
 #endif // DIAG_QUEUE
@@ -915,6 +943,16 @@ void setup()
   pinMode( vs1053Mode, OUTPUT );
   pinMode( vs1053Reset, OUTPUT );
 #endif
+
+#if featureNeoPix
+  // This preceedes the VS1053 initialization (which can take a half second) just so that the
+  // lights are turned off as soon as possible if present.
+  neoPixels[0].strip.setPin( neoPix0Pin );
+  neoPixels[0].strip.clearStrip();
+  neoPixels[1].strip.setPin( neoPix1Pin );
+  neoPixels[1].strip.clearStrip();
+  processNeoPixReset();
+#endif // featureNeoPix
 
 #if featureCodec
   // If we can enter CODEC mode, then we interpret that to mean that we are running with
@@ -939,13 +977,8 @@ void setup()
   servos[0].servo.attach( servo0Pin );  // attaches the servo object to the appropriate pin.
   servos[1].servo.attach( servo1Pin );
   processServoReset();
+  timer.setInterval( servoDelay, processServos );
 #endif // featureServos
-
-#if featureNeoPix
-  neoPixels[0].strip.setPin( neoPix0Pin );
-  neoPixels[1].strip.setPin( neoPix1Pin );
-  processNeoPixReset();
-#endif // featureNeoPix
 
   showCapabilities();
 
@@ -965,6 +998,7 @@ void loop()
   timer.run();
 }
 
+#if !DIAG_STANDALONE
 // This routine is called (in the context of an interrupt) when data has been received
 // by the wire/I2C interface. The code suggests that it will be called when the end of a
 // possibly multi-byte sequence is received. Not so sure how this will work...
@@ -976,6 +1010,19 @@ void receiveData(int howMany)
     cmdQueue.push_back( data );
   }
 }
+void requestData()
+{
+//  if( !reqQueue.empty() ) {
+//    Wire.write( reqQueue.pop_front() );
+//  }
+//  else {  
+    Wire.write( genStatusByte()  );
+#if DIAG_QUEUE
+    ++readRequests;
+#endif // DIAG_QUEUE
+//  }
+}
+#endif // !DIAG_STANDALONE
 
 byte genStatusByte() 
 {
@@ -1000,18 +1047,6 @@ byte genStatusByte()
 #endif // featureCodec
   return data;
 }
-void requestData()
-{
-//  if( !reqQueue.empty() ) {
-//    Wire.write( reqQueue.pop_front() );
-//  }
-//  else {  
-    Wire.write( genStatusByte()  );
-#if DIAG_QUEUE
-    ++readRequests;
-#endif // DIAG_QUEUE
-//  }
-}
 
 // This table is a map from a command to a function to process that command. I have also
 // included a 'numBytes' with the thought that in the future commands could be of different
@@ -1033,9 +1068,10 @@ static const struct {
   { 5, 1, processCodecStop },
 #endif // featureCodec
 #if featureServos
-  { 10, 1, processServoMove },
-  { 11, 1, processServoSpeed },
-  { 12, 1, processServoDirection },
+  { 10, 3, processServoSegment },
+  { 11, 3, processServoSegment },
+  { 12, 3, processServoSegment },
+  { 15, 1, processServoStop },
 #endif // featureServos
 #if featureNeoPix
   { 20, 3, processNeoPixConfig },
@@ -1069,9 +1105,13 @@ void processCmdQueue()
     // (everything with the msb set) and can have 1 or 2 data bytes.
     if( (cmd & 0x80) != 0 ) {
       cmdFunc = processMIDI;
+#if allMidiHave2Bytes
+      dataBytes = 2;
+#else
       dataBytes = 1;
       if ( (cmd & 0xF0) != 0xC0 && (cmd & 0xF0) != 0xD0 )
         dataBytes = 2;
+#endif
     }
     else {
 #endif // featureSynth
@@ -1094,7 +1134,7 @@ void processCmdQueue()
       cmdProcessing = true;
       // Now that we know we have all the bytes, we can update our read pointer.
       cmdQueue.pop_front();
-      byte data[5];
+      byte data[7];
       for ( byte i = 0; i < dataBytes; ++i )
         data[i] = cmdQueue.pop_front();
       for ( byte i = dataBytes; i < sizeof(data); ++i )
@@ -1129,4 +1169,117 @@ void processCmdQueue()
     }
   } //   while( !cmdQueue.empty() )
 }
+
+#if DIAG_STANDALONE
+// In DIAG_STANDALONE, the cmdQueue is filled from the following 'script'.
+// For each entry, it waits the specified amout of time, and then places the supplied
+// bytes into the queue.
+
+static const struct {
+  uint16_t delay;
+  byte dataBytes;
+  byte bytes[7];
+} testScript[] PROGMEM = {
+  { 100,   0, { 127, 0 } },             // Reset
+#if featureNeoPix
+  { 100,   3, { 20, 0, 8, 127, 0 } },   // Configure Leds 0
+  { 0,     3, { 20, 1, 8, 127, 0 } },   // Configure Leds 1
+  { 100,   5, { 24, 0, 0, 127, 10, 10, 0 } },
+  { 0,     5, { 25, 0, 7, 10, 10, 127, 0 } },
+  { 0,     3, { 31, 0, 1, 32, 0 } },    // Walk Leds
+#endif // featureNeoPix
+#if featureServos
+  { 100,   3, { 10, 0, 135, 20, 0 } },   // Servo start segment
+  { 100,   3, { 11, 0,  90, 40, 0 } },   // Servo add segment
+  { 100,   3, { 11, 0,  45, 20, 0 } },   // Servo add segment
+  { 100,   3, { 12, 0,  90, 40, 0 } },   // Servo run segment
+#endif // featureServos
+#if featureCodec
+  { 100,   1, { 1, 2, 0 } },            // Track mode
+  { 0,     1, { 2, 1, 0 } },            // Play track 1
+#if featureNeoPix
+  { 100,   5, { 26, 1, 0, 10, 31, 10 } }, // Leds 1 to green
+  { 0,     5, { 25, 1, 0, 0, 0, 0, 0 } }, // Except Led 0
+  { 0,     1, { 21, 1, 0 } },           // Show Led 1
+#endif // featureNeoPix
+  { 20000, 1, { 5, 0, 0 } },            // Stop track
+#if featureServos
+  { 100,   3, { 10, 0, 45, 40, 0 } },    // Servo segment
+#endif // featureServos
+  { 100,   1, { 2, 2, 0 } },            // Play track 2
+#if featureNeoPix
+  { 100,   5, { 26, 1, 0, 10, 63, 10 } }, // Leds 1 to green
+  { 0,     5, { 25, 1, 1, 0, 0, 0, 0 } }, // Except Led 1
+  { 0,     1, { 21, 1, 0 } },           // Show Led 1
+#endif // featureNeoPix
+  { 20000, 1, { 5, 0, 0 } },
+#if featureServos
+  { 100,   3, { 10, 0, 90, 10, 0 } },    // Servo segment
+#endif // featureServos
+  { 100,   1, { 2, 3, 0 } },            // Play track 3
+#if featureNeoPix
+  { 100,   5, { 26, 1, 0, 10, 95, 10 } }, // Leds 1 to green
+  { 0,     5, { 25, 1, 2, 0, 0, 0, 0 } }, // Except Led 2
+  { 0,     1, { 21, 1, 0 } },           // Show Led 1
+#endif // featureNeoPix
+  { 20000, 1, { 5, 0, 0 } },
+  { 100,   1, { 2, 4, 0 } },            // Play track 4
+#if featureNeoPix
+  { 100,   5, { 26, 1, 0, 10, 127, 10 } }, // Leds 1 to green
+  { 0,     5, { 25, 1, 3, 0, 0, 0, 0 } }, // Except Led 3
+  { 0,     1, { 21, 1, 0 } },           // Show Led 1
+#endif // featureNeoPix
+  { 20000, 1, { 5, 0, 0 } },
+#endif // featureCodec
+#if featureNeoPix
+  { 0,     3, { 31, 0, 0, 0, 0 } },     // Stop Leds
+  { 100,   5, { 24, 0, 0, 10, 127, 10, 0 } },
+  { 0,     5, { 25, 0, 7, 10, 10, 127, 0 } },
+  { 0,     5, { 26, 1, 0, 127, 10, 10 } }, // Leds 1 to red
+#endif // featureNeoPix
+#if featureServos
+//  { 100,   1, { 11, 31, 0 } },          // Servo speed
+//  { 0,     1, { 12, 2, 0 } },           // Servo direction
+//  { 0,     1, { 10, 2, 0 } },           // Servo move 1
+#endif // featureServos
+#if featureSynth
+  { 100,   1, { 1, 1, 0 } },            // Note mode
+  { 500,   2, { 153, 36, 127, 0 } },    // BdB
+  { 60,    2, { 153, 45, 127, 0 } },    
+  { 60,    2, { 153, 49, 127, 0 } },    
+#if featureNeoPix
+  { 0,     3, { 30, 0, -1, 0, 0 } },    // Rotate Leds
+#endif // featureNeoPix
+  { 500,   2, { 153, 36, 100, 0 } },    
+  { 60,    2, { 153, 45, 100, 0 } },    
+  { 60,    2, { 153, 49, 100, 0 } }, 
+#if featureNeoPix
+  { 0,     3, { 30, 0, -2, 0, 0 } },    // Rotate Leds
+#endif // featureNeoPix
+  { 500,   2, { 153, 36, 75, 0 } },    
+  { 60,    2, { 153, 45, 75, 0 } },    
+  { 60,    2, { 153, 49, 75, 0 } }, 
+#if featureNeoPix
+  { 0,     3, { 30, 0, -4, 0, 0 } },    // Rotate Leds
+#endif // featureNeoPix
+#endif // featureSynth
+  { 500,   1, { 1, 0, 0 } },            // No music
+};
+byte testScriptIndex = 0;
+
+void processTestScript()
+{
+  uint16_t delay = 0;
+  do {
+    byte dataBytes = pgm_read_byte_near( &testScript[testScriptIndex].dataBytes );
+    for( byte i = 0; i <= dataBytes; ++i )
+      cmdQueue.push_back( pgm_read_byte_near( &testScript[testScriptIndex].bytes[i] ) );
+    ++testScriptIndex;
+    if( testScriptIndex >= sizeof( testScript ) / sizeof( testScript[0] ) )
+      testScriptIndex = 0;
+    delay = pgm_read_word_near( &testScript[testScriptIndex].delay );
+  } while( delay == 0 );
+  timer.setTimeout( delay, processTestScript );
+}
+#endif // DIAG_STANDALONE
 
