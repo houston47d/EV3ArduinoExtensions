@@ -3,7 +3,8 @@
 // Set one of the following to '1' to select which configuration to build for. These each
 // represent one of the configurations that we are currently using. More can certainly be added
 // as desired. All assume the EV3 interface (since that is the whole reason this code exists).
-// Any can have either servos or NeoPixels attached as pins allow.
+// Any can have either servos or NeoPixels attached as pins allow. Note that you must also select
+// the appropriate Arduino flavor under Tools/Board.
 //
 // Arduino Uno with the AdaFruit Music Maker Shield
 #define UnoWithAdafruitMms 0
@@ -33,7 +34,7 @@
 #define featureServos 0
 #define servo0Pin 8
 #define servo1Pin 10
-#define featureNeoPix 1
+#define featureNeoPix 0
 #define neoPix0Pin 6
 #define neoPix1Pin 8
 
@@ -65,7 +66,12 @@
 #define synthPin 5
 #define featureServos 1
 #define servo0Pin 8
-#define servo1Pin 9
+// #define servo1Pin 9
+#define servo1Pin 6
+#define featureNeoPix 1
+// #define neoPix0Pin 6
+#define neoPix0Pin 9
+#define neoPix1Pin 10
 
 #elif ProMicro
 // The main purpose of the Pro Micro alone is to run the two NeoPixel strips as these
@@ -85,6 +91,41 @@
 #else
 # error "No platform configuration defined"
 #endif
+
+// All the Serial.print statements add up. Removing all of them from a full build cuts down almost 4K.
+// define VERBOSITY 0 removes all of them.
+// define VERBOSITY 1 includes only the highest level statements, like program identification and errors.
+// define VERBOSITY 2 includes statements like program configuration and mode changes.
+// define VERBOSITY 3 includes everything.
+// Keep these levels in mind when adding new statements. Always use one of the _printN and _printlnN 
+// variants rather than calling Serial.print[ln]() directly.
+#define VERBOSITY 2
+#if VERBOSITY >= 1
+#define _print1(x) Serial.print(x)
+#define _println1(x) Serial.println(x)
+#else
+#define _print1(x)
+#define _println1(x)
+#endif
+#if VERBOSITY >= 2
+#define _print2(x) Serial.print(x)
+#define _println2(x) Serial.println(x)
+#else
+#define _print2(x)
+#define _println2(x)
+#endif
+#if VERBOSITY >= 3
+#define _print3(x) Serial.print(x)
+#define _println3(x) Serial.println(x)
+#else
+#define _print3(x)
+#define _println3(x)
+#endif
+
+// Memory saving steps.
+// In addition to the above VERBOSITY setting, I had to modify the SD library to allow it to compile
+// out all of the write capabilities. We had no interest in writing to the SD card, and yet they are 
+// linked in because the functions are called by other functions that handle both read and write.
 
 #include <SPI.h>
 #include <Wire.h>
@@ -128,7 +169,7 @@ class MidiCodecMode {
       // initialise the music player. We do this every time we switch between modes because
       // it performs some initialization required following the reset.
       if (! musicPlayer.begin()) {
-        Serial.println(F("VS1053 not found on SPI"));
+        _println1(F("VS1053 not found on SPI"));
         return ( false );
       }
 
@@ -143,7 +184,7 @@ class MidiCodecMode {
       // For Uno/Duemilanove/Diecimilla that's Digital #2 or #3
       // See http://arduino.cc/en/Reference/attachInterrupt for other pins
       // if (! musicPlayer.useInterrupt(VS1053_FILEPLAYER_PIN_INT))
-      //  Serial.println(F("DREQ pin is not an interrupt pin"));
+      //  _println(F("DREQ pin is not an interrupt pin"));
 
       musicPlayer.setVolume(20, 20); // default volume, 20 .5 dB steps below maximum.
       //    musicPlayer.sineTest(0x44, 500);    // Make a tone to indicate VS1053 is working
@@ -157,10 +198,10 @@ class MidiCodecMode {
     void stop() {
       if ( !musicPlayer.stopped() )
       {
-        Serial.print(F("Stopping playback..."));
+        _print2(F("Stopping playback..."));
         musicPlayer.stopPlaying();
         wasPlaying = false;
-        Serial.println(F("stopped"));
+        _println2(F("stopped"));
       }
     }
 
@@ -168,14 +209,12 @@ class MidiCodecMode {
       stop();
       if ( musicPlayer.startPlayingFile( filename ) )
       {
-        Serial.print( F("Playing file: ") );
-        Serial.println( filename );
+        _print2( F("Playing file: ") ); _println2( filename );
         wasPlaying = true;
       }
       else
       {
-        Serial.print( F("Failed to start playing file: ") );
-        Serial.println( filename );
+        _print1( F("Failed to start playing file: ") ); _println1( filename );
       }
     }
 
@@ -193,7 +232,7 @@ class MidiCodecMode {
       musicPlayer.feedBuffer();
       if ( wasPlaying && musicPlayer.stopped() )
       {
-        Serial.println( F("Playback completed") );
+        _println2( F("Playback completed") );
         wasPlaying = false;
       }
     }
@@ -224,15 +263,15 @@ void processCodecPlayTrack( byte cmd, const byte* data )
     if( SD.exists( filename ) ) {
       VS1053_CODEC.start( filename );
       if ( !VS1053_CODEC.isPlaying() ) {
-        Serial.print( F("Error: Failed to play ") ); Serial.println( filename );
+        _print1( F("Error: Failed to play ") ); _println1( filename );
       }
     }
     else {
-      Serial.print( F("Error: Track not found ") ); Serial.println( filename );
+      _print1( F("Error: Track not found ") ); _println1( filename );
     }
   }
   else
-    Serial.println( F("Error: Play track command while not in CODEC mode") );
+    _println2( F("Warn: Play track command while not in CODEC mode") );
 }
 void processCodecStatus( byte cmd, const byte* data )
 {
@@ -286,7 +325,7 @@ void processMIDI( byte cmd, const byte* data )
     talkMIDI( cmd, data[0], data[1] );
   }
   else 
-    Serial.println( F("Error: MIDI command while not in synthesizer mode") );
+    _println2( F("Warn: MIDI command while not in synthesizer mode") );
 }
 #endif // featureSynth
 
@@ -392,65 +431,117 @@ void processServoReset()
 
 #if featureNeoPix
 // The configuration will be set at runtime with information from the EV3.
+enum NeoPixWalkMode { walkNone, walkPixels, walkFramesBounce, walkFramesRoll };
 struct neoPixelData {
   Adafruit_NeoPixel strip;
   uint32_t startColor;
   uint16_t startPosition;
+  NeoPixWalkMode walkMode;
   int16_t walkStep;
+  uint16_t walkFrame;
   int timerId;
   
-  neoPixelData() : startColor( 0 ), startPosition( -1 ), walkStep( 0 ), timerId( -1 ) {}
+  neoPixelData() : startColor( 0 ), startPosition( -1 ), walkMode( walkNone ), walkStep( 0 ), walkFrame( 0 ), timerId( -1 ) {}
 } neoPixels[2];
 
-void processNeoPix0()
+void processNeoPixWalkPixels0()
 {
   neoPixelData& npdata( neoPixels[0] );
   npdata.strip.rotatePixels( npdata.walkStep );
   npdata.strip.show();
 }
-void processNeoPix1()
+void processNeoPixWalkPixels1()
 {
   neoPixelData& npdata( neoPixels[1] );
   npdata.strip.rotatePixels( npdata.walkStep );
   npdata.strip.show();
 }
+void processNeoPixTimerWalkFrames( byte strip )
+{
+  neoPixelData& npdata( neoPixels[strip] );
+  if( npdata.walkStep > 0 && npdata.walkFrame == npdata.strip.numFrames() - 1 ) {
+    if( npdata.walkMode == walkFramesBounce ) {
+      npdata.walkStep = -npdata.walkStep;
+      npdata.walkFrame += npdata.walkStep;
+    }
+    else
+      npdata.walkFrame = 0;
+  }
+  else if( npdata.walkStep < 0 && npdata.walkFrame == 0 ) {
+    if( npdata.walkMode == walkFramesBounce ) {
+      npdata.walkStep = -npdata.walkStep;
+      npdata.walkFrame += npdata.walkStep; 
+    }
+    else
+      npdata.walkFrame = npdata.strip.numFrames() - 1;
+  }
+  else {
+    npdata.walkFrame += npdata.walkStep;
+  }
+  npdata.strip.setFrame( npdata.walkFrame );
+  npdata.strip.show();
+}
+void processNeoPixTimerWalkFrames0() {
+  processNeoPixTimerWalkFrames( 0 );
+}
+void processNeoPixTimerWalkFrames1() {
+  processNeoPixTimerWalkFrames( 1 );
+}
 void processNeoPixConfig( byte cmd, const byte* data )
 {
-  // Command 64 is NeoPixel Configure. Data0/1 is the number of pixels in the string attached to
+  // Command 20 is NeoPixel Configure. Data0/1 is the number of pixels in the string attached to
   // pin 6, and Data2/3 is the number of pixels in the string attached to pin 7. Should be zero if
   // the string is not present.
   // uint16_t length = ((uint16_t) data[0] << 8 | data[1]);
-  neoPixelData& npdata( neoPixels[data[0] & 0x1] );
+  byte strip = (data[0] & 0x1);
+  uint16_t frames = (data[0] >> 1) + 1;
+  neoPixelData& npdata( neoPixels[strip] );
   uint16_t length = data[1];
   byte brightness = data[2];
   if ( length > 0 ) {
-    Serial.print( F("Configure NeoPixel strip ") ); Serial.print( data[0] & 0x1 ); 
-        Serial.print( F(" length ") ); Serial.print(length); Serial.print( F(" brightness ") ); Serial.println(brightness);
+    _print2( F("Configure NeoPixel strip ") ); _print2( strip ); 
+        _print2( F(" length ") ); _print2(length); _print2( F(" frames ") ); _print2(frames);
+        _print2( F(" brightness ") ); _println2(brightness);
     npdata.strip.updateType( NEO_GRB | NEO_KHZ800 );
-    npdata.strip.updateLength( length );
+    // Only update the length if it has changed, since it will realloc unnecessarily.
+    if( length != npdata.strip.numPixels() || frames != npdata.strip.numFrames() )
+      npdata.strip.updateLength( length, frames );
     npdata.strip.setBrightness( brightness );
-    npdata.strip.begin();
+    if( npdata.strip.numPixels() == length && npdata.strip.numFrames() == frames ) {
+       npdata.strip.begin();
+    }
+    else {
+      _print1( F("Error: failed configuring strip") );
+    }
   }
   else {
-    Serial.print( F("Disabling NeoPixel strip ") ); Serial.println( data[0] & 0x1 );
+    _print2( F("Disabling NeoPixel strip ") ); _println2( strip );
     npdata.strip.end();
   }
 }
 void processNeoPixShow( byte cmd, const byte* data )
 {
-  neoPixelData& npdata( neoPixels[data[0] & 0x1] );
+  byte strip = (data[0] & 0x1);
+  uint16_t frame = (data[0] >> 1);
+  neoPixelData& npdata( neoPixels[strip] );
+  npdata.strip.setFrame( frame );
   npdata.strip.show();
 }
 void processNeoPixSetStart( byte cmd, const byte* data )
 {
-  neoPixelData& npdata( neoPixels[data[0] & 0x1] );
+  byte strip = (data[0] & 0x1);
+  // uint16_t frame = (data[0] >> 1);
+  neoPixelData& npdata( neoPixels[strip] );
   npdata.startPosition = data[1];
   npdata.startColor = Adafruit_NeoPixel::Color( data[2], data[3], data[4] );
 }
 void processNeoPixSetEnd( byte cmd, const byte* data )
 {
-  neoPixelData& npdata( neoPixels[data[0] & 0x1] );
+  byte strip = (data[0] & 0x1);
+  uint16_t frame = (data[0] >> 1);
+  neoPixelData& npdata( neoPixels[strip] );
   if( npdata.strip.numPixels() ) {
+    npdata.strip.setFrame( frame );
     uint16_t endPosition = data[1];
     uint32_t endColor = Adafruit_NeoPixel::Color( data[2], data[3], data[4] );
     if( npdata.startPosition != -1 )
@@ -462,8 +553,11 @@ void processNeoPixSetEnd( byte cmd, const byte* data )
 }
 void processNeoPixSetAll( byte cmd, const byte* data )
 {
-  neoPixelData& npdata( neoPixels[data[0] & 0x1] );
+  byte strip = (data[0] & 0x1);
+  uint16_t frame = (data[0] >> 1);
+  neoPixelData& npdata( neoPixels[strip] );
   if( npdata.strip.numPixels() ) {
+    npdata.strip.setFrame( frame );
     uint32_t color = Adafruit_NeoPixel::Color( data[2], data[3], data[4] );
     npdata.strip.setPixelRange( 0, color, npdata.strip.numPixels() - 1, color );
     npdata.strip.show();
@@ -471,16 +565,21 @@ void processNeoPixSetAll( byte cmd, const byte* data )
 }
 void processNeoPixRotate( byte cmd, const byte* data )
 {
-  neoPixelData& npdata( neoPixels[data[0] & 0x1] );
+  byte strip = (data[0] & 0x1);
+  uint16_t frame = (data[0] >> 1);
+  neoPixelData& npdata( neoPixels[strip] );
   if( npdata.strip.numPixels() ) {
+    npdata.strip.setFrame( frame );
     int16_t shift = (int8_t) data[1];
     npdata.strip.rotatePixels( shift );
     npdata.strip.show();
   }
 }
-void processNeoPixWalk( byte cmd, const byte* data )
+void processNeoPixWalkPixels( byte cmd, const byte* data )
 {
-  neoPixelData& npdata( neoPixels[data[0] & 0x1] );
+  byte strip = (data[0] & 0x1);
+  uint16_t frame = (data[0] >> 1);
+  neoPixelData& npdata( neoPixels[strip] );
   if( npdata.timerId >= 0 ) {
     timer.deleteTimer( npdata.timerId );
     npdata.timerId = -1;
@@ -488,12 +587,48 @@ void processNeoPixWalk( byte cmd, const byte* data )
   npdata.walkStep = data[1];
   long interval = (long) data[2] << 4;
   if( npdata.walkStep > 0 && interval > 0 ) {
-    Serial.print( F("Starting NeoPixel walk strip ") ); Serial.print(data[0] & 0x1); 
-        Serial.print( F(" step ") ); Serial.print(npdata.walkStep); Serial.print( F(" interval ") ); Serial.println(interval);
-    npdata.timerId = timer.setInterval( interval, (data[0] & 0x1 ? processNeoPix1 : processNeoPix0) );
+    _print3( F("Starting NeoPixel walk pixels strip ") ); _print3(strip); 
+        _print3( F(" step ") ); _print3(npdata.walkStep); _print3( F(" interval ") ); _println3(interval);
+    npdata.walkMode = walkPixels;
+    npdata.timerId = timer.setInterval( interval, (strip ? processNeoPixWalkPixels1 : processNeoPixWalkPixels0) );
   }
   else {
-    Serial.print( F("Stopping NeoPixel walk strip ") ); Serial.println(data[0] & 0x1);
+    npdata.walkMode = walkNone;
+    _print3( F("Stopping NeoPixel walk pixels strip ") ); _println3(strip);
+  }
+}
+void processNeoPixWalkFrames( byte cmd, const byte* data )
+{
+  byte strip = (data[0] & 0x1);
+  // uint16_t frame = (data[0] >> 1);
+  neoPixelData& npdata( neoPixels[strip] );
+  if( npdata.timerId >= 0 ) {
+    timer.deleteTimer( npdata.timerId );
+    npdata.timerId = -1;
+    npdata.walkMode = walkNone;
+  }
+  long interval = (long) data[2] << 4;
+  if( interval > 0 ) {
+    int count = (data[1] & 0x7f);
+    _print3( F("Starting NeoPixel walk frames strip ") ); _print3(strip); 
+        _print3( F(" count ") ); _print3(count); _print3( F(" interval ") ); _println3(interval);
+    npdata.walkMode = (data[1] & 0x80 ? walkFramesBounce : walkFramesRoll);
+    // setup the initial conditions so that it immediately rolls or bounces with the first timer interval.
+    if( npdata.walkMode == walkFramesBounce ) {
+      npdata.walkFrame = 1;
+      npdata.walkStep = -1;
+    }
+    else {
+      npdata.walkFrame = npdata.strip.numFrames() - 1;
+      npdata.walkStep = 1;
+    }
+    if( count == 0 )
+      npdata.timerId = timer.setInterval( interval, (strip ? processNeoPixTimerWalkFrames1 : processNeoPixTimerWalkFrames0) );
+    else
+      npdata.timerId = timer.setTimer( interval, (strip ? processNeoPixTimerWalkFrames1 : processNeoPixTimerWalkFrames0), count );
+  }
+  else {
+    _print3( F("Stopping NeoPixel walk frames strip ") ); _println3(strip);
   }
 }
 void processNeoPixReset()
@@ -536,14 +671,14 @@ void processMusicMode( byte cmd, const byte* data )
   // Turn off any mode that is no longer desired.
 #if featureSynth
   if( data[0] != 1 && midiSynthMode ) {
-    Serial.println( F("Turning off MIDI SYNTH mode") );
+    _println2( F("Turning off MIDI SYNTH mode") );
     // Nothing to do...
     midiSynthMode = false;
   }
 #endif // featureSynth
 #if featureCodec
   if( data[0] != 2 && mp3CodecMode ) {
-    Serial.println( F("Turning off CODEC mode") );
+    _println2( F("Turning off CODEC mode") );
     VS1053_CODEC.exit();
     mp3CodecMode = false;
   }
@@ -553,7 +688,7 @@ void processMusicMode( byte cmd, const byte* data )
   if( data[0] == 1 ) {
 #if featureSynth
     if( !midiSynthMode ) {
-      Serial.println( F("Turning on MIDI SYNTH mode") );
+      _print2( F("Turning on MIDI SYNTH mode...") );
 #if defined( vs1053Reset ) && defined( vs1053Mode )
       // Put into MIDI synthesizer mode.
       resetVS1053( true );
@@ -563,28 +698,29 @@ void processMusicMode( byte cmd, const byte* data )
       talkMIDI( MIDI_CHAN_MSG | 0, MIDI_CHAN_BANK, VS1053_BANK_MELODY );
       talkMIDI( MIDI_CHAN_PROGRAM | 0, VS1053_GM1_OCARINA, 0 );
       talkMIDI( MIDI_CHAN_MSG | 0, MIDI_CHAN_VOLUME, 127 );
-
       midiSynthMode = true;
+      _println2( F(" done") );
     }
 #else
-    Serial.println( F("Error: MIDI commands not supported by this build") );
+    _println1( F("Error: MIDI commands not supported by this build") );
 #endif // featureSynth
   }
   if( data[0] == 2 ) {
 #if featureCodec
     if ( !mp3CodecMode ) {
       if ( usingAdaFruitMMS && sdCardPresent ) {
-        Serial.println( F("Turning on CODEC mode") );
+        _print2( F("Turning on CODEC mode...") );
         VS1053_CODEC.enter();
         mp3CodecMode = true;
+        _println2( F(" done") );
       }
       else if( !sdCardPresent )
-        Serial.println( F("Error: SD card not present") );
+        _println1( F("Error: SD card not present") );
       else
-        Serial.println( F("Error: AdaFruit Music Maker Shield not present") );
+        _println1( F("Error: AdaFruit Music Maker Shield not present") );
     }
 #else
-    Serial.println( F("Error: Codec commands not supported by this build") );
+    _println1( F("Error: Codec commands not supported by this build") );
 #endif
   }
 }
@@ -613,7 +749,7 @@ void processReset( byte cmd, const byte* data )
 {
   // Command 127 is the 'restore default state' command. It basically sets everything back to
   // the power on defaults so that the EV3 program is starting from a known state.
-  Serial.println( F("Restoring default state") );
+  _println2( F("Restoring default state") );
 #if featureNeoPix
   processNeoPixReset();
 #endif // featureNeoPix
@@ -639,46 +775,60 @@ void processReset( byte cmd, const byte* data )
   // while running setup, so you never see it. Now I dump it out on each reset default state.
   showCapabilities();
 }
+// void processNop( byte cmd, const byte* data )
+// {
+// }
+void processTest( byte cmd, const byte* data )
+{
+  _print2( F("Test cmd ") ); _print2( cmd );
+  for( int i = 0; i < 5; i++ ) {
+    _print2( F(" ") ); _print2( data[i] );
+  }
+  _println2( F("") );
+}
 void processUnrecognized( byte cmd, const byte* data )
 {
-  Serial.print( F("Error: Unrecognized command ") ); Serial.println(cmd);
+  _print1( F("Error: Unrecognized command ") ); _println1(cmd);
 }
 
 void showCapabilities()
 {
-  Serial.begin(115200);
-  Serial.println( F("EV3 Arduino Extensions - " __DATE__ " " __TIME__) );
+  _println1( F("EV3 Arduino Extensions - " __DATE__ " " __TIME__) );
 
 #if featureCodec
-  Serial.println( F("Codec support for AdaFruit Music Maker Shield.") );
-  Serial.println( F("- supports .mp3 and .mid files.") );
+  _println2( F("Codec support for AdaFruit Music Maker Shield.") );
+  _println2( F("- supports .mp3 and .mid files.") );
   if( usingAdaFruitMMS ) {
-    Serial.println( F("- detected AdaFruit Music Maker Shield") );
+    _println2( F("- detected AdaFruit Music Maker Shield") );
     if ( sdCardPresent )
-      Serial.println( F("- detected SD card") );
+      _println2( F("- detected SD card") );
   }
 #endif // featureCodec
 
 #if featureSynth
-  Serial.print( F("MIDI synthesizer support on pin ") ); Serial.println( synthPin );
-  Serial.println( F("- supports AdaFruit Music Maker Shield OR SparkFun Music Instrument Shield") );
+  _print2( F("MIDI synthesizer support on pin ") ); _println2( synthPin );
+  _println2( F("- supports AdaFruit Music Maker Shield OR SparkFun Music Instrument Shield") );
 #endif // featureSynth
 
 #if defined( vs1053Mode ) && defined( vs1053Reset )
-  Serial.print( F("Switching music modes requires RST on pin ") ); Serial.print( vs1053Reset ); Serial.print( F(" and GPIO1 to pin ") ); Serial.println( vs1053Mode );
+  _print2( F("Switching music modes requires RST on pin ") ); _print2( vs1053Reset ); _print2( F(" and GPIO1 to pin ") ); _println2( vs1053Mode );
 #endif // defined( vs1053Mode ) && defined( vs1053Reset )
 
 #if featureServos
-  Serial.print( F("Servo support for servos on pin ") ); Serial.print( servo0Pin ); Serial.print( F( " and pin ") ); Serial.println( servo1Pin );
+  _print2( F("Servo support for servos on pin ") ); _print2( servo0Pin ); _print2( F( " and pin ") ); _println2( servo1Pin );
 #endif // featureServos
 
 #if featureNeoPix
-  Serial.print( F("NeoPixel support for strips on pin ") ); Serial.print( neoPix0Pin ); Serial.print( F(" and pin ") ); Serial.println( neoPix1Pin );
+  _print2( F("NeoPixel support for strips on pin ") ); _print2( neoPix0Pin ); _print2( F(" and pin ") ); _println2( neoPix1Pin );
 #endif // featureNeoPix
 }
 
 void setup()
 {
+#if VERBOSITY
+  Serial.begin(115200);
+#endif // VERBOSITY
+
   Wire.begin( ardAdd );
   Wire.onReceive( receiveData );
   Wire.onRequest( requestData );
@@ -786,8 +936,9 @@ struct xferQueue {
     overflowOccured = false;
     return( data );
   }
-} cmdQueue, reqQueue;
+} cmdQueue; // , reqQueue;
 volatile bool cmdProcessing = false;
+//bool cmdWaiting = false;
 
 // This routine is called (in the context of an interrupt) when data has been received
 // by the wire/I2C interface. The code suggests that it will be called when the end of a
@@ -803,12 +954,12 @@ void receiveData(int howMany)
 
 void requestData()
 {
-  if( !reqQueue.empty() ) {
-    Wire.write( reqQueue.pop_front() );
-  }
-  else {  
+//  if( !reqQueue.empty() ) {
+//    Wire.write( reqQueue.pop_front() );
+//  }
+//  else {  
     byte data = 0x80;
-    if( !cmdQueue.empty() || cmdProcessing )
+    if( cmdProcessing || !cmdQueue.empty() )
       data |= 0x1;
 #if featureCodec
     if( mp3CodecMode )
@@ -827,7 +978,7 @@ void requestData()
       data |= 0x40;
 #endif // featureCodec
     Wire.write( data );
-  }
+//  }
 }
 
 // This table is a map from a command to a function to process that command. I have also
@@ -861,18 +1012,23 @@ static const struct {
   { 25, 5, processNeoPixSetEnd },
   { 26, 5, processNeoPixSetAll },
   { 30, 3, processNeoPixRotate },
-  { 31, 3, processNeoPixWalk },
+  { 31, 3, processNeoPixWalkPixels },
+  { 32, 3, processNeoPixWalkFrames },
 #endif // featureNeoPix
+  { 125, 3, processTest },
+  { 126, 5, processTest },
   { 127, 0, processReset },
+//  { 0, 0, processNop },
 };
 
 void processCmdQueue()
 {
-  // Serial.print("write: "); Serial.print(cmdQueueWrite); Serial.print(", read: "); Serial.println(cmdQueueRead);
+  // _print("write: "); _print(cmdQueueWrite); _print(", read: "); _println(cmdQueueRead);
 
-  if ( cmdQueue.overflow() )
-    Serial.println( F("Error: Command queue overflow, likely command errors") );
-
+  if ( cmdQueue.overflow() ) {
+    _println1( F("Error: Command queue overflow, likely command errors") );
+  }
+  
   while( !cmdQueue.empty() ) {
     byte cmd = cmdQueue.peek_front();
     commandFunction cmdFunc = processUnrecognized;
@@ -891,7 +1047,7 @@ void processCmdQueue()
       for ( int i = 0; i < sizeof(commandToFuncMap) / sizeof(commandToFuncMap[0]); ++i )
       {
         byte mapCmd = pgm_read_byte_near( &commandToFuncMap[i].cmd );
-        // Serial.print( "i " ); Serial.print( i ); Serial.print( " cmd "); Serial.println( mapCmd );
+        // _print( "i " ); _print( i ); _print( " cmd "); _println( mapCmd );
         if ( cmd == mapCmd )
         {
           cmdFunc = (commandFunction) pgm_read_word_near( &commandToFuncMap[i].func );
@@ -904,6 +1060,10 @@ void processCmdQueue()
 #endif // featureSynth
 
     if( cmdQueue.bytes() >= 1 + dataBytes ) {
+//      if( cmdWaiting ) {
+//        Serial.println( F(" done") );
+//        cmdWaiting = false;
+//      }
       cmdProcessing = true;
       // Now that we know we have all the bytes, we can update our read pointer.
       cmdQueue.pop_front();
@@ -913,6 +1073,7 @@ void processCmdQueue()
       for ( byte i = dataBytes; i < sizeof(data); ++i )
         data[i] = 0;
 
+      _print2( F("Processing cmd ") ); _println2( cmd );
       // now that we have the data bytes collected, invoke the processing function.
       (*cmdFunc)( cmd, data );
   
@@ -922,18 +1083,23 @@ void processCmdQueue()
     {
       // At the moment, I cannot send six bytes at once from the EV3. So I tollerate getting them
       // as 2+4.
-      if( cmdQueue.bytes() == 2 && dataBytes == 5 )
+      if( (cmdQueue.bytes() == 2 || cmdQueue.bytes() == 4) && dataBytes >= 3 ) {
+//        if( !cmdWaiting ) {
+//          Serial.print( F("waiting for data, cmd ") ); Serial.print( cmdQueue.peek_front() ); 
+//          cmdWaiting = true;
+//        }
         break;
+      }
       // data byte has not arrived yet. Process it next time. Why don't we wait 'forever' for it to 
       // arrive? Because sometimes we get garbage over the wire, and if it looks like a command then
       // it gets stuck. This way, if the rest of the command does not show up fairly quickly, then
       // we discard it.
-      Serial.println( cmdQueue.bytes() );
+      _println3( cmdQueue.bytes() );
       static byte s_tries = 0;
       ++s_tries;
       if ( s_tries > 3 )
       {
-        Serial.print( F("Error: Incomplete command ") ); Serial.println(cmd);
+        _print1( F("Error: Incomplete command ") ); _println1(cmd);
         cmdQueue.pop_front();
         s_tries = 0;
       }
